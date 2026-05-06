@@ -31,7 +31,7 @@ const initDB = async () => {
         // Create tables one by one
         await pool.query(`
             CREATE TABLE IF NOT EXISTS businesses (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name VARCHAR(200) NOT NULL,
                 owner_name VARCHAR(150) NOT NULL,
                 phone VARCHAR(20) UNIQUE NOT NULL,
@@ -46,7 +46,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 full_name VARCHAR(150) NOT NULL,
                 phone VARCHAR(20) UNIQUE NOT NULL,
@@ -60,7 +60,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS products (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 category_id UUID,
                 name_translations JSONB NOT NULL DEFAULT '{}',
@@ -78,7 +78,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS customers (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 full_name VARCHAR(150) NOT NULL,
                 phone VARCHAR(20),
@@ -91,7 +91,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS sales (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 user_id UUID NOT NULL REFERENCES users(id),
                 customer_id UUID REFERENCES customers(id),
@@ -111,7 +111,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS sale_items (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
                 product_id UUID NOT NULL REFERENCES products(id),
                 quantity INTEGER NOT NULL,
@@ -124,7 +124,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS expenses (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 user_id UUID NOT NULL REFERENCES users(id),
                 category VARCHAR(50) NOT NULL,
@@ -137,7 +137,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS stock_transactions (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 product_id UUID NOT NULL REFERENCES products(id),
                 user_id UUID NOT NULL REFERENCES users(id),
@@ -150,7 +150,7 @@ const initDB = async () => {
         
         await pool.query(`
             CREATE TABLE IF NOT EXISTS credit_transactions (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
                 customer_id UUID NOT NULL REFERENCES customers(id),
                 sale_id UUID REFERENCES sales(id),
@@ -165,8 +165,9 @@ const initDB = async () => {
         
         console.log('✅ Database tables ready');
     } catch (err) {
-        console.error('❌ Init error:', err.message);
-    }
+    console.error('❌ Init error:', err.message);
+    console.error('Full error:', err);  // ADD THIS LINE
+}
 };
 
 initDB();
@@ -218,10 +219,15 @@ app.post('/api/auth/register', async (req, res) => {
             business_id: businessId 
         });
     } catch (error) {
-        console.error('Register error:', error.message);
-        res.status(500).json({ error: error.message || 'Registration failed' });
-    }
-});
+    console.error('REGISTER ERROR:', error.message);
+    console.error('FULL ERROR:', error);
+    res.status(500).json({ 
+        error: 'Registration failed', 
+        detail: error.message,
+        table: error.table,
+        code: error.code
+    });
+}
 
 // LOGIN
 app.post('/api/auth/login', async (req, res) => {
