@@ -45,7 +45,6 @@ app.get('/', (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { business_name, owner_name, phone, password } = req.body;
-
         // Validate
         if (!business_name || !owner_name || !phone || !password) {
             return res.status(400).json({ error: 'All fields required' });
