@@ -97,9 +97,10 @@ app.post('/api/auth/register', async (req, res) => {
             business_id: businessId 
         });
 
-    } catch (error) {
-        console.error('Register error:', error);
-        res.status(500).json({ error: error.message });
+        } catch (error) {
+        console.error('Register error:', error.message);
+        console.error('Full error:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+        res.status(500).json({ error: error.message || 'Registration failed' });
     }
 });
 
