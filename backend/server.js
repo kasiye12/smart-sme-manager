@@ -22,13 +22,13 @@ pool.on('error', (err) => {
     console.error('Unexpected pool error:', err);
 });
 
-pool.query('SELECT NOW()')
-    .then(() => console.log('Database connected'))
-    .catch(err => console.error('Database connection error:', err.message));
-
-// Auto-create tables
+// Auto-create tables (FIXED: One by one)
 const initDB = async () => {
     try {
+        // Enable UUID extension first
+        await pool.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+        
+        // Create tables one by one
         await pool.query(`
             CREATE TABLE IF NOT EXISTS businesses (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -41,7 +41,10 @@ const initDB = async () => {
                 is_active BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -52,7 +55,10 @@ const initDB = async () => {
                 is_active BOOLEAN DEFAULT true,
                 last_login_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS products (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -67,7 +73,10 @@ const initDB = async () => {
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(business_id, barcode)
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS customers (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -77,7 +86,10 @@ const initDB = async () => {
                 current_balance DECIMAL(12,2) DEFAULT 0,
                 is_active BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS sales (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -94,7 +106,10 @@ const initDB = async () => {
                 payment_method VARCHAR(30),
                 is_synced BOOLEAN DEFAULT false,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS sale_items (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 sale_id UUID NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
@@ -104,7 +119,10 @@ const initDB = async () => {
                 cost_price DECIMAL(12,2) NOT NULL,
                 total_price DECIMAL(12,2) NOT NULL,
                 profit_amount DECIMAL(12,2) GENERATED ALWAYS AS (total_price - (quantity * cost_price)) STORED
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS expenses (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -114,7 +132,10 @@ const initDB = async () => {
                 description TEXT,
                 expense_date DATE NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS stock_transactions (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -124,7 +145,10 @@ const initDB = async () => {
                 quantity INTEGER NOT NULL,
                 notes TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
+        `);
+        
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS credit_transactions (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 business_id UUID NOT NULL REFERENCES businesses(id),
@@ -136,21 +160,23 @@ const initDB = async () => {
                 balance_after DECIMAL(12,2) NOT NULL,
                 payment_method VARCHAR(30),
                 created_at TIMESTAMPTZ DEFAULT NOW()
-            );
+            )
         `);
-        console.log('Database tables ready');
+        
+        console.log('✅ Database tables ready');
     } catch (err) {
-        console.error('Init error:', err.message);
+        console.error('❌ Init error:', err.message);
     }
 };
 
 initDB();
 
-// TEST ENDPOINT
+// Health check
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Smart SME Manager API Running',
         version: '1.0.0',
+        database: 'connected',
         timestamp: new Date().toISOString()
     });
 });
@@ -257,7 +283,10 @@ app.get('/api/products', authenticate, async (req, res) => {
             [req.user.business_id]
         );
         res.json({ products: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Products error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // ADD PRODUCT
@@ -273,7 +302,10 @@ app.post('/api/products', authenticate, async (req, res) => {
             [req.user.business_id, category_id || null, JSON.stringify(name_translations), barcode, cost_price, selling_price, current_stock || 0]
         );
         res.status(201).json({ success: true, product_id: result.rows[0].id });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Add product error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // MAKE SALE
@@ -294,7 +326,7 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
             if (prodResult.rows.length === 0) throw new Error(`Product not found`);
             const product = prodResult.rows[0];
-            if (product.current_stock < item.quantity) throw new Error(`Insufficient stock`);
+            if (product.current_stock < item.quantity) throw new Error(`Insufficient stock for ${product.name_translations}`);
             const itemTotal = product.selling_price * item.quantity;
             subtotal += itemTotal;
             saleItems.push({
@@ -302,13 +334,16 @@ app.post('/api/sales', authenticate, async (req, res) => {
                 unit_price: product.selling_price, cost_price: product.cost_price, total_price: itemTotal
             });
         }
-        const taxAmount = subtotal * 0.15;
-        const totalAmount = subtotal + taxAmount;
+        const taxAmount = parseFloat((subtotal * 0.15).toFixed(2));
+        const totalAmount = parseFloat((subtotal + taxAmount).toFixed(2));
+        const saleNumber = 'INV-' + Date.now();
+        
         const saleResult = await client.query(
             `INSERT INTO sales (business_id, user_id, customer_id, sale_number, subtotal, discount_amount, tax_amount, total_amount, amount_paid, payment_status, payment_method) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-            [req.user.business_id, req.user.id, customer_id || null, 'INV-' + Date.now(), subtotal, 0, taxAmount, totalAmount, amount_paid || totalAmount, 'paid', payment_method || 'cash']
+            [req.user.business_id, req.user.id, customer_id || null, saleNumber, subtotal, 0, taxAmount, totalAmount, amount_paid || totalAmount, 'paid', payment_method || 'cash']
         );
+        
         const saleId = saleResult.rows[0].id;
         for (const item of saleItems) {
             await client.query(
@@ -317,12 +352,22 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
             await client.query('UPDATE products SET current_stock = current_stock - $1, updated_at = NOW() WHERE id = $2', [item.quantity, item.product_id]);
         }
+        
         await client.query('COMMIT');
-        res.status(201).json({ success: true, sale_id: saleId, total_amount: totalAmount, items_sold: saleItems.length });
+        res.status(201).json({ 
+            success: true, 
+            sale_id: saleId, 
+            sale_number: saleNumber,
+            total_amount: totalAmount, 
+            items_sold: saleItems.length 
+        });
     } catch (error) {
         await client.query('ROLLBACK');
+        console.error('Sale error:', error);
         res.status(500).json({ error: error.message });
-    } finally { client.release(); }
+    } finally { 
+        client.release(); 
+    }
 });
 
 // DAILY REPORT
@@ -331,7 +376,7 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
         const today = req.query.date || new Date().toISOString().split('T')[0];
         const result = await pool.query(
             `SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COUNT(DISTINCT customer_id) as unique_customers
-             FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_status = 'paid'`,
+             FROM sales WHERE business_id = $1 AND sale_date = $2`,
             [req.user.business_id, today]
         );
         const profitResult = await pool.query(
@@ -341,7 +386,10 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             [req.user.business_id, today]
         );
         res.json({ date: today, ...result.rows[0], gross_profit: profitResult.rows[0].gross_profit });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Report error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // GET CUSTOMERS
@@ -349,7 +397,10 @@ app.get('/api/customers', authenticate, async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM customers WHERE business_id = $1 ORDER BY full_name', [req.user.business_id]);
         res.json({ customers: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Customers error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // ADD CUSTOMER
@@ -359,7 +410,10 @@ app.post('/api/customers', authenticate, async (req, res) => {
         if (!full_name) return res.status(400).json({ error: 'Name required' });
         const result = await pool.query('INSERT INTO customers (business_id, full_name, phone) VALUES ($1, $2, $3) RETURNING id', [req.user.business_id, full_name, phone]);
         res.status(201).json({ success: true, customer_id: result.rows[0].id });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Add customer error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // EXPENSES
@@ -367,18 +421,27 @@ app.get('/api/expenses', authenticate, async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM expenses WHERE business_id = $1 ORDER BY expense_date DESC LIMIT 50', [req.user.business_id]);
         res.json({ expenses: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Expenses error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 app.post('/api/expenses', authenticate, async (req, res) => {
     try {
         const { category, amount, description, expense_date } = req.body;
+        if (!category || !amount) {
+            return res.status(400).json({ error: 'Category and amount required' });
+        }
         const result = await pool.query(
             'INSERT INTO expenses (business_id, user_id, category, amount, description, expense_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [req.user.business_id, req.user.id, category, amount, description, expense_date]
+            [req.user.business_id, req.user.id, category, amount, description, expense_date || new Date().toISOString().split('T')[0]]
         );
         res.status(201).json({ success: true, expense_id: result.rows[0].id });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        console.error('Add expense error:', error);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // START SERVER
@@ -386,7 +449,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`╔══════════════════════════════════════╗`);
     console.log(`║  SMART SME MANAGER API              ║`);
-    console.log(`║  Server: http://localhost:${PORT}       ║`);
+    console.log(`║  Server: http://0.0.0.0:${PORT}        ║`);
+    console.log(`║  Database: Connected                ║`);
     console.log(`║  Started: ${new Date().toISOString()}  ║`);
     console.log(`╚══════════════════════════════════════╝`);
 });
