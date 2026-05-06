@@ -1,0 +1,41 @@
+config:
+  target: "http://localhost:3000"
+  phases:
+    - duration: 60
+      arrivalRate: 10
+      rampTo: 50
+      name: "Warm up"
+    - duration: 300
+      arrivalRate: 50
+      rampTo: 100
+      name: "Ramp up load"
+  processor: "./tests/load_processor.js"
+
+scenarios:
+  - name: "Complete sale flow"
+    flow:
+      - post:
+          url: "/api/v2/auth/login"
+          json:
+            phone: "+251912345678"
+            password: "TestPass123"
+          capture:
+            - json: "$.access_token"
+              as: "token"
+      
+      - get:
+          url: "/api/v2/products"
+          headers:
+            Authorization: "Bearer {{ token }}"
+      
+      - post:
+          url: "/api/v2/sales"
+          headers:
+            Authorization: "Bearer {{ token }}"
+          json:
+            items:
+              - product_id: "product-uuid-here"
+                quantity: 2
+            payment_method: "cash"
+            payment_status: "paid"
+            amount_paid: 100

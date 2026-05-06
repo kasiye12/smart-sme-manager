@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:e2e": "jest --config jest.e2e.config.js",
+    "test:load": "artillery run tests/load_tests.yml"
+  }
+}
