@@ -219,15 +219,15 @@ app.post('/api/auth/register', async (req, res) => {
             business_id: businessId 
         });
     } catch (error) {
-    console.error('REGISTER ERROR:', error.message);
-    console.error('FULL ERROR:', error);
+    console.error('Register error:', error.message);
+    console.error('Full error:', error);
     res.status(500).json({ 
-        error: 'Registration failed', 
+        error: 'Registration failed',
         detail: error.message,
-        table: error.table,
-        code: error.code
+        code: error.code 
     });
 }
+});
 
 // LOGIN
 app.post('/api/auth/login', async (req, res) => {
