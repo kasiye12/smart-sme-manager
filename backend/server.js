@@ -9,8 +9,6 @@ app.use(express.json());
 
 // Database connection
 const pool = new Pool({
-    // host: process.env.DB_HOST || 'localhost',
-    
     host: process.env.DB_HOST || 'localhost',
     port: process.env.DB_PORT || 5432,
     database: process.env.DB_NAME || 'smart_sme_manager',
@@ -18,7 +16,10 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || 'Kasu1122',
     ssl: {
         rejectUnauthorized: false
-    }
+    },
+    max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
 });
 
 
