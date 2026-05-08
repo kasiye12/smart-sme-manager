@@ -462,6 +462,249 @@ app.put('/api/products/:id', authenticate, async (req, res) => {
     }
 });
 // ============================================
+// MONTHLY REPORT
+// ============================================
+app.get('/api/reports/monthly', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+        const targetMonth = month || new Date().getMonth() + 1;
+        const targetYear = year || new Date().getFullYear();
+        
+        const result = await pool.query(
+            `SELECT 
+                COUNT(*) as total_sales,
+                COALESCE(SUM(total_amount), 0) as total_revenue,
+                COALESCE(SUM(tax_amount), 0) as total_tax,
+                COALESCE(SUM(discount_amount), 0) as total_discounts,
+                COUNT(DISTINCT customer_id) as unique_customers,
+                COUNT(DISTINCT sale_date) as active_days
+             FROM sales 
+             WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM sale_date) = $2 
+             AND EXTRACT(YEAR FROM sale_date) = $3`,
+            [req.user.business_id, targetMonth, targetYear]
+        );
+        
+        // Monthly profit
+        const profitResult = await pool.query(
+            `SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit
+             FROM sale_items si JOIN sales s ON si.sale_id = s.id
+             WHERE s.business_id = $1 
+             AND EXTRACT(MONTH FROM s.sale_date) = $2 
+             AND EXTRACT(YEAR FROM s.sale_date) = $3`,
+            [req.user.business_id, targetMonth, targetYear]
+        );
+        
+        // Monthly expenses
+        const expenseResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_expenses
+             FROM expenses 
+             WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM expense_date) = $2 
+             AND EXTRACT(YEAR FROM expense_date) = $3`,
+            [req.user.business_id, targetMonth, targetYear]
+        );
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        
+        res.json({
+            period: 'monthly',
+            month: parseInt(targetMonth),
+            year: parseInt(targetYear),
+            ...result.rows[0],
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: grossProfit - totalExpenses
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// YEARLY REPORT
+// ============================================
+app.get('/api/reports/yearly', authenticate, async (req, res) => {
+    try {
+        const { year } = req.query;
+        const targetYear = year || new Date().getFullYear();
+        
+        const result = await pool.query(
+            `SELECT 
+                COUNT(*) as total_sales,
+                COALESCE(SUM(total_amount), 0) as total_revenue,
+                COALESCE(SUM(tax_amount), 0) as total_tax,
+                COUNT(DISTINCT customer_id) as unique_customers,
+                COUNT(DISTINCT EXTRACT(MONTH FROM sale_date)) as active_months
+             FROM sales 
+             WHERE business_id = $1 
+             AND EXTRACT(YEAR FROM sale_date) = $2`,
+            [req.user.business_id, targetYear]
+        );
+        
+        const profitResult = await pool.query(
+            `SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit
+             FROM sale_items si JOIN sales s ON si.sale_id = s.id
+             WHERE s.business_id = $1 
+             AND EXTRACT(YEAR FROM s.sale_date) = $2`,
+            [req.user.business_id, targetYear]
+        );
+        
+        const expenseResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_expenses
+             FROM expenses 
+             WHERE business_id = $1 
+             AND EXTRACT(YEAR FROM expense_date) = $2`,
+            [req.user.business_id, targetYear]
+        );
+        
+        // Monthly breakdown
+        const monthlyBreakdown = await pool.query(
+            `SELECT 
+                EXTRACT(MONTH FROM sale_date) as month,
+                COUNT(*) as sales_count,
+                COALESCE(SUM(total_amount), 0) as revenue
+             FROM sales 
+             WHERE business_id = $1 
+             AND EXTRACT(YEAR FROM sale_date) = $2
+             GROUP BY EXTRACT(MONTH FROM sale_date)
+             ORDER BY month`,
+            [req.user.business_id, targetYear]
+        );
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        
+        res.json({
+            period: 'yearly',
+            year: parseInt(targetYear),
+            ...result.rows[0],
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: grossProfit - totalExpenses,
+            monthly_breakdown: monthlyBreakdown.rows
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// QUARTERLY REPORT
+// ============================================
+app.get('/api/reports/quarterly', authenticate, async (req, res) => {
+    try {
+        const { quarter, year } = req.query;
+        const targetQuarter = quarter || Math.ceil((new Date().getMonth() + 1) / 3);
+        const targetYear = year || new Date().getFullYear();
+        
+        const startMonth = (targetQuarter - 1) * 3 + 1;
+        const endMonth = startMonth + 2;
+        
+        const result = await pool.query(
+            `SELECT 
+                COUNT(*) as total_sales,
+                COALESCE(SUM(total_amount), 0) as total_revenue,
+                COALESCE(SUM(tax_amount), 0) as total_tax,
+                COUNT(DISTINCT customer_id) as unique_customers,
+                COUNT(DISTINCT sale_date) as active_days
+             FROM sales 
+             WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM sale_date) BETWEEN $2 AND $3
+             AND EXTRACT(YEAR FROM sale_date) = $4`,
+            [req.user.business_id, startMonth, endMonth, targetYear]
+        );
+        
+        const profitResult = await pool.query(
+            `SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit
+             FROM sale_items si JOIN sales s ON si.sale_id = s.id
+             WHERE s.business_id = $1 
+             AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $2 AND $3
+             AND EXTRACT(YEAR FROM s.sale_date) = $4`,
+            [req.user.business_id, startMonth, endMonth, targetYear]
+        );
+        
+        const expenseResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_expenses
+             FROM expenses 
+             WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM expense_date) BETWEEN $2 AND $3
+             AND EXTRACT(YEAR FROM expense_date) = $4`,
+            [req.user.business_id, startMonth, endMonth, targetYear]
+        );
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        
+        res.json({
+            period: 'quarterly',
+            quarter: parseInt(targetQuarter),
+            year: parseInt(targetYear),
+            months: `${startMonth}-${endMonth}`,
+            ...result.rows[0],
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: grossProfit - totalExpenses
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// SALES SUMMARY (for dashboard stats)
+// ============================================
+app.get('/api/reports/summary', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const thisMonth = new Date().getMonth() + 1;
+        const thisYear = new Date().getFullYear();
+        
+        // Today
+        const todayResult = await pool.query(
+            `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
+             FROM sales WHERE business_id = $1 AND sale_date = $2`,
+            [req.user.business_id, today]
+        );
+        
+        // This month
+        const monthResult = await pool.query(
+            `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
+             FROM sales WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM sale_date) = $2 AND EXTRACT(YEAR FROM sale_date) = $3`,
+            [req.user.business_id, thisMonth, thisYear]
+        );
+        
+        // This year
+        const yearResult = await pool.query(
+            `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
+             FROM sales WHERE business_id = $1 AND EXTRACT(YEAR FROM sale_date) = $2`,
+            [req.user.business_id, thisYear]
+        );
+        
+        // Totals
+        const totalResult = await pool.query(
+            `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue
+             FROM sales WHERE business_id = $1`,
+            [req.user.business_id]
+        );
+        
+        res.json({
+            today: todayResult.rows[0],
+            this_month: monthResult.rows[0],
+            this_year: yearResult.rows[0],
+            all_time: totalResult.rows[0]
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
