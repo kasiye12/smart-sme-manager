@@ -234,16 +234,20 @@ app.post('/api/customers', authenticate, async (req, res) => {
 // ============================================
 // SALES
 // ============================================
+// MAKE SALE (Updated with credit support)
 app.post('/api/sales', authenticate, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const { items, customer_id, payment_method, amount_paid } = req.body;
+        const { items, customer_id, payment_method, amount_paid, payment_status } = req.body;
+        
         if (!items || items.length === 0) {
             return res.status(400).json({ error: 'No items in sale' });
         }
+        
         let subtotal = 0;
         const saleItems = [];
+        
         for (const item of items) {
             const prodResult = await client.query(
                 'SELECT * FROM products WHERE id = $1 AND business_id = $2',
@@ -252,6 +256,7 @@ app.post('/api/sales', authenticate, async (req, res) => {
             if (prodResult.rows.length === 0) throw new Error('Product not found');
             const product = prodResult.rows[0];
             if (product.current_stock < item.quantity) throw new Error('Insufficient stock');
+            
             const itemTotal = product.selling_price * item.quantity;
             subtotal += itemTotal;
             saleItems.push({
@@ -259,17 +264,23 @@ app.post('/api/sales', authenticate, async (req, res) => {
                 unit_price: product.selling_price, cost_price: product.cost_price, total_price: itemTotal
             });
         }
+        
         const taxAmount = parseFloat((subtotal * 0.15).toFixed(2));
         const totalAmount = parseFloat((subtotal + taxAmount).toFixed(2));
         const saleNumber = 'INV-' + Date.now();
+        const isCredit = payment_status === 'credit' || payment_method === 'credit';
+        const paidAmount = isCredit ? 0 : (amount_paid || totalAmount);
         
+        // Insert sale
         const saleResult = await client.query(
             `INSERT INTO sales (business_id, user_id, customer_id, sale_number, subtotal, discount_amount, tax_amount, total_amount, amount_paid, payment_status, payment_method) 
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-            [req.user.business_id, req.user.id, customer_id || null, saleNumber, subtotal, 0, taxAmount, totalAmount, amount_paid || totalAmount, 'paid', payment_method || 'cash']
+            [req.user.business_id, req.user.id, customer_id || null, saleNumber, subtotal, 0, taxAmount, totalAmount, paidAmount, isCredit ? 'credit' : 'paid', payment_method || 'cash']
         );
         
         const saleId = saleResult.rows[0].id;
+        
+        // Insert sale items and update stock
         for (const item of saleItems) {
             await client.query(
                 'INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, cost_price, total_price) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -277,13 +288,34 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
             await client.query('UPDATE products SET current_stock = current_stock - $1, updated_at = NOW() WHERE id = $2', [item.quantity, item.product_id]);
         }
+        
+        // 🔥 UPDATE CUSTOMER BALANCE FOR CREDIT SALES
+        if (isCredit && customer_id) {
+            await client.query(
+                'UPDATE customers SET current_balance = current_balance + $1 WHERE id = $2',
+                [totalAmount, customer_id]
+            );
+            
+            // Record credit transaction
+            const custResult = await client.query('SELECT current_balance FROM customers WHERE id = $1', [customer_id]);
+            await client.query(
+                `INSERT INTO credit_transactions (business_id, customer_id, sale_id, user_id, transaction_type, amount, balance_after)
+                 VALUES ($1, $2, $3, $4, 'credit', $5, $6)`,
+                [req.user.business_id, customer_id, saleId, req.user.id, totalAmount, custResult.rows[0].current_balance]
+            );
+        }
+        
         await client.query('COMMIT');
+        
         res.status(201).json({ 
             success: true, sale_id: saleId, sale_number: saleNumber,
-            total_amount: totalAmount, items_sold: saleItems.length 
+            total_amount: totalAmount, items_sold: saleItems.length,
+            is_credit: isCredit
         });
+        
     } catch (error) {
         await client.query('ROLLBACK');
+        console.error('Sale error:', error);
         res.status(500).json({ error: error.message });
     } finally { 
         client.release(); 
