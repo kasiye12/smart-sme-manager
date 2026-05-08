@@ -705,6 +705,60 @@ app.get('/api/reports/summary', authenticate, async (req, res) => {
     }
 });
 // ============================================
+// CUSTOM DATE RANGE REPORT
+// ============================================
+app.get('/api/reports/custom', authenticate, async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        
+        if (!from || !to) {
+            return res.status(400).json({ error: 'From and To dates required' });
+        }
+        
+        const result = await pool.query(
+            `SELECT 
+                COUNT(*) as total_sales,
+                COALESCE(SUM(total_amount), 0) as total_revenue,
+                COALESCE(SUM(tax_amount), 0) as total_tax,
+                COALESCE(SUM(discount_amount), 0) as total_discounts,
+                COUNT(DISTINCT customer_id) as unique_customers,
+                COUNT(DISTINCT sale_date) as active_days
+             FROM sales 
+             WHERE business_id = $1 
+             AND sale_date BETWEEN $2 AND $3`,
+            [req.user.business_id, from, to]
+        );
+        
+        const profitResult = await pool.query(
+            `SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit
+             FROM sale_items si JOIN sales s ON si.sale_id = s.id
+             WHERE s.business_id = $1 AND s.sale_date BETWEEN $2 AND $3`,
+            [req.user.business_id, from, to]
+        );
+        
+        const expenseResult = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_expenses
+             FROM expenses WHERE business_id = $1 AND expense_date BETWEEN $2 AND $3`,
+            [req.user.business_id, from, to]
+        );
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        
+        res.json({
+            period: 'custom',
+            from, to,
+            ...result.rows[0],
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: grossProfit - totalExpenses
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
