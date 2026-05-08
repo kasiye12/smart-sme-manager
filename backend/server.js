@@ -343,6 +343,125 @@ app.post('/api/expenses', authenticate, async (req, res) => {
 });
 
 // ============================================
+// STOCK ADJUSTMENT
+// ============================================
+app.post('/api/inventory/adjust', authenticate, async (req, res) => {
+    try {
+        const { product_id, adjustment_type, quantity, direction, reason } = req.body;
+        
+        if (!product_id || !quantity || !direction) {
+            return res.status(400).json({ error: 'Product, quantity, and direction required' });
+        }
+        
+        // Get product
+        const product = await pool.query(
+            'SELECT * FROM products WHERE id = $1 AND business_id = $2',
+            [product_id, req.user.business_id]
+        );
+        
+        if (product.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        // Update stock
+        const newStock = direction === 'in' 
+            ? product.rows[0].current_stock + parseInt(quantity)
+            : product.rows[0].current_stock - parseInt(quantity);
+            
+        if (newStock < 0) {
+            return res.status(400).json({ error: 'Insufficient stock' });
+        }
+        
+        await pool.query(
+            'UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2',
+            [newStock, product_id]
+        );
+        
+        // Log adjustment
+        await pool.query(
+            `INSERT INTO stock_adjustments (business_id, product_id, user_id, adjustment_type, quantity, direction, reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]
+        );
+        
+        // Record stock transaction
+        await pool.query(
+            `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [req.user.business_id, product_id, req.user.id, direction === 'in' ? 'adjustment' : adjustment_type || 'adjustment', quantity, reason]
+        );
+        
+        res.json({ 
+            success: true, 
+            message: `Stock ${direction === 'in' ? 'increased' : 'decreased'} by ${quantity}`,
+            new_stock: newStock
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET STOCK ADJUSTMENTS
+app.get('/api/inventory/adjustments', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT sa.*, p.name_translations as product_name
+             FROM stock_adjustments sa
+             JOIN products p ON sa.product_id = p.id
+             WHERE sa.business_id = $1
+             ORDER BY sa.created_at DESC
+             LIMIT 50`,
+            [req.user.business_id]
+        );
+        res.json({ adjustments: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// UPDATE PRODUCT (Full update with unit)
+app.put('/api/products/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name_translations, barcode, cost_price, selling_price, current_stock, unit, category_id } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE products SET 
+                name_translations = COALESCE($1, name_translations),
+                barcode = COALESCE($2, barcode),
+                cost_price = COALESCE($3, cost_price),
+                selling_price = COALESCE($4, selling_price),
+                current_stock = COALESCE($5, current_stock),
+                unit = COALESCE($6, unit),
+                category_id = COALESCE($7, category_id),
+                updated_at = NOW()
+             WHERE id = $8 AND business_id = $9
+             RETURNING *`,
+            [
+                name_translations ? JSON.stringify(name_translations) : null,
+                barcode,
+                cost_price,
+                selling_price,
+                current_stock,
+                unit,
+                category_id,
+                id,
+                req.user.business_id
+            ]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        res.json({ success: true, product: result.rows[0] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
