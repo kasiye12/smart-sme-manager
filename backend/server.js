@@ -759,6 +759,166 @@ app.get('/api/reports/custom', authenticate, async (req, res) => {
     }
 });
 // ============================================
+// VOID SALE
+// ============================================
+app.post('/api/sales/:id/void', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const { id } = req.params;
+        const { reason } = req.body;
+        
+        // Get sale
+        const sale = await client.query(
+            'SELECT * FROM sales WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (sale.rows.length === 0) {
+            return res.status(404).json({ error: 'Sale not found' });
+        }
+        
+        if (sale.rows[0].status === 'voided') {
+            return res.status(400).json({ error: 'Sale already voided' });
+        }
+        
+        // Update sale status
+        await client.query(
+            "UPDATE sales SET status = 'voided', void_reason = $1, updated_at = NOW() WHERE id = $2",
+            [reason || 'No reason provided', id]
+        );
+        
+        // Restore stock
+        const items = await client.query('SELECT * FROM sale_items WHERE sale_id = $1', [id]);
+        for (const item of items.rows) {
+            await client.query(
+                'UPDATE products SET current_stock = current_stock + $1, updated_at = NOW() WHERE id = $2',
+                [item.quantity, item.product_id]
+            );
+        }
+        
+        // If credit sale, reverse customer balance
+        if (sale.rows[0].customer_id && sale.rows[0].payment_status === 'credit') {
+            await client.query(
+                'UPDATE customers SET current_balance = current_balance - $1, updated_at = NOW() WHERE id = $2',
+                [sale.rows[0].total_amount - sale.rows[0].amount_paid, sale.rows[0].customer_id]
+            );
+        }
+        
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'Sale voided successfully' });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// GET ALL SALES (for void/review)
+app.get('/api/sales', authenticate, async (req, res) => {
+    try {
+        const limit = req.query.limit || 50;
+        const result = await pool.query(
+            `SELECT s.*, c.full_name as customer_name
+             FROM sales s LEFT JOIN customers c ON s.customer_id = c.id
+             WHERE s.business_id = $1
+             ORDER BY s.created_at DESC LIMIT $2`,
+            [req.user.business_id, limit]
+        );
+        res.json({ sales: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
+// STOCK ADJUSTMENT
+// ============================================
+app.post('/api/inventory/adjust', authenticate, async (req, res) => {
+    try {
+        const { product_id, adjustment_type, quantity, direction, reason } = req.body;
+        
+        if (!product_id || !quantity || !direction) {
+            return res.status(400).json({ error: 'Product, quantity, and direction required' });
+        }
+        
+        const product = await pool.query(
+            'SELECT * FROM products WHERE id = $1 AND business_id = $2',
+            [product_id, req.user.business_id]
+        );
+        
+        if (product.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        const newStock = direction === 'in' 
+            ? product.rows[0].current_stock + parseInt(quantity)
+            : product.rows[0].current_stock - parseInt(quantity);
+            
+        if (newStock < 0) {
+            return res.status(400).json({ error: 'Insufficient stock' });
+        }
+        
+        await pool.query(
+            'UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2',
+            [newStock, product_id]
+        );
+        
+        await pool.query(
+            `INSERT INTO stock_adjustments (business_id, product_id, user_id, adjustment_type, quantity, direction, reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]
+        );
+        
+        res.json({ success: true, message: `Stock ${direction === 'in' ? 'increased' : 'decreased'} by ${quantity}`, new_stock: newStock });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
+// RECORD CUSTOMER PAYMENT
+// ============================================
+app.post('/api/customers/:id/payment', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, payment_method } = req.body;
+        
+        const customer = await pool.query('SELECT * FROM customers WHERE id = $1 AND business_id = $2', [id, req.user.business_id]);
+        if (customer.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        
+        const newBalance = customer.rows[0].current_balance - parseFloat(amount);
+        
+        await pool.query('UPDATE customers SET current_balance = $1, updated_at = NOW() WHERE id = $2', [newBalance, id]);
+        
+        await pool.query(
+            `INSERT INTO credit_transactions (business_id, customer_id, user_id, transaction_type, amount, balance_after, payment_method)
+             VALUES ($1, $2, $3, 'payment', $4, $5, $6)`,
+            [req.user.business_id, id, req.user.id, amount, newBalance, payment_method || 'cash']
+        );
+        
+        res.json({ success: true, new_balance: newBalance, message: 'Payment recorded' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET CUSTOMER PAYMENT HISTORY
+app.get('/api/customers/:id/history', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query(
+            `SELECT * FROM credit_transactions WHERE customer_id = $1 AND business_id = $2 ORDER BY created_at DESC`,
+            [id, req.user.business_id]
+        );
+        res.json({ transactions: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
