@@ -945,6 +945,39 @@ app.put('/api/customers/:id', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// DELETE CUSTOMER
+app.delete('/api/customers/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Check if customer has outstanding balance
+        const customer = await pool.query('SELECT * FROM customers WHERE id = $1 AND business_id = $2', [id, req.user.business_id]);
+        if (customer.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        
+        // Soft delete - mark as inactive
+        await pool.query('UPDATE customers SET is_active = false, updated_at = NOW() WHERE id = $1', [id]);
+        
+        res.json({ success: true, message: 'Customer deleted' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ADD CUSTOMER
+app.post('/api/customers', authenticate, async (req, res) => {
+    try {
+        const { full_name, phone, credit_limit } = req.body;
+        if (!full_name) return res.status(400).json({ error: 'Name required' });
+        
+        const result = await pool.query(
+            'INSERT INTO customers (business_id, full_name, phone, credit_limit) VALUES ($1, $2, $3, $4) RETURNING id',
+            [req.user.business_id, full_name, phone, credit_limit || 0]
+        );
+        res.status(201).json({ success: true, customer_id: result.rows[0].id });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================
 // START SERVER
 // ============================================
