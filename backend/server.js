@@ -1011,6 +1011,34 @@ app.post('/api/customers', authenticate, async (req, res) => {
     }
 });
 // ============================================
+// DELETE PRODUCT
+// ============================================
+app.delete('/api/products/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const product = await pool.query(
+            'SELECT * FROM products WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (product.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        // Soft delete - mark as inactive
+        await pool.query(
+            'UPDATE products SET is_active = false, updated_at = NOW() WHERE id = $1',
+            [id]
+        );
+        
+        res.json({ success: true, message: 'Product deleted successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
