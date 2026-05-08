@@ -918,6 +918,33 @@ app.get('/api/customers/:id/history', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// UPDATE CUSTOMER (with credit limit)
+app.put('/api/customers/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { full_name, phone, credit_limit } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE customers SET 
+                full_name = COALESCE($1, full_name),
+                phone = COALESCE($2, phone),
+                credit_limit = COALESCE($3, credit_limit),
+                updated_at = NOW()
+             WHERE id = $4 AND business_id = $5
+             RETURNING *`,
+            [full_name, phone, credit_limit, id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Customer not found' });
+        }
+        
+        res.json({ success: true, customer: result.rows[0], message: 'Customer updated' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================
 // START SERVER
 // ============================================
