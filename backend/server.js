@@ -972,6 +972,202 @@ app.post('/api/expenses', authenticate, authorize('owner', 'manager'), async (re
 });
 
 // ============================================
+// SETTINGS & PROFILE APIs
+// ============================================
+
+// GET BUSINESS PROFILE
+app.get('/api/business/profile', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, name, owner_name, phone, email, city, subscription_tier, created_at FROM businesses WHERE id = $1',
+            [req.user.business_id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Business not found' });
+        res.json({ business: result.rows[0] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// UPDATE BUSINESS PROFILE
+app.put('/api/business/profile', authenticate, async (req, res) => {
+    try {
+        const { name, owner_name, phone, email, city } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE businesses SET 
+                name = COALESCE($1, name),
+                owner_name = COALESCE($2, owner_name),
+                phone = COALESCE($3, phone),
+                email = COALESCE($4, email),
+                city = COALESCE($5, city),
+                updated_at = NOW()
+             WHERE id = $6
+             RETURNING id, name, owner_name, phone, email, city`,
+            [name, owner_name, phone, email, city, req.user.business_id]
+        );
+        
+        res.json({ success: true, business: result.rows[0], message: 'Profile updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// CHANGE PASSWORD
+app.put('/api/auth/change-password', authenticate, async (req, res) => {
+    try {
+        const { current_password, new_password } = req.body;
+        
+        if (!current_password || !new_password) {
+            return res.status(400).json({ error: 'Current and new password required' });
+        }
+        if (new_password.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
+        
+        // Verify current password
+        const user = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+        if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        
+        const validPassword = await bcrypt.compare(current_password, user.rows[0].password_hash);
+        if (!validPassword) return res.status(401).json({ error: 'Current password is incorrect' });
+        
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(new_password, salt);
+        
+        await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashedPassword, req.user.id]);
+        
+        res.json({ success: true, message: 'Password changed successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET SUBSCRIPTION INFO
+app.get('/api/business/subscription', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT subscription_tier, subscription_expires_at, created_at FROM businesses WHERE id = $1',
+            [req.user.business_id]
+        );
+        
+        const plans = {
+            free: { name: 'Free', price: 0, features: ['Basic POS', '50 Products', 'Daily Reports'] },
+            basic: { name: 'Basic', price: 300, features: ['Unlimited Products', 'All Reports', 'Credit Management'] },
+            premium: { name: 'Premium', price: 500, features: ['Everything in Basic', 'Multi-user', 'Priority Support'] },
+            enterprise: { name: 'Enterprise', price: 1500, features: ['Everything in Premium', 'API Access', 'Custom Reports', 'Dedicated Support'] }
+        };
+        
+        const currentPlan = plans[result.rows[0].subscription_tier] || plans.free;
+        
+        res.json({
+            current_plan: result.rows[0].subscription_tier,
+            expires_at: result.rows[0].subscription_expires_at,
+            plan_details: currentPlan,
+            all_plans: plans
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// UPGRADE SUBSCRIPTION
+app.post('/api/business/upgrade', authenticate, async (req, res) => {
+    try {
+        const { plan } = req.body;
+        const validPlans = ['free', 'basic', 'premium', 'enterprise'];
+        
+        if (!validPlans.includes(plan)) {
+            return res.status(400).json({ error: 'Invalid plan' });
+        }
+        
+        const expiresAt = new Date();
+        expiresAt.setMonth(expiresAt.getMonth() + 1);
+        
+        await pool.query(
+            'UPDATE businesses SET subscription_tier = $1, subscription_expires_at = $2, updated_at = NOW() WHERE id = $3',
+            [plan, expiresAt, req.user.business_id]
+        );
+        
+        res.json({ success: true, plan, expires_at: expiresAt, message: `Upgraded to ${plan} plan` });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET SETTINGS
+app.get('/api/settings', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT settings FROM businesses WHERE id = $1',
+            [req.user.business_id]
+        );
+        res.json({ settings: result.rows[0]?.settings || {} });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// UPDATE SETTINGS
+app.put('/api/settings', authenticate, async (req, res) => {
+    try {
+        const { currency, low_stock_alerts, language } = req.body;
+        
+        const currentSettings = await pool.query('SELECT settings FROM businesses WHERE id = $1', [req.user.business_id]);
+        const settings = currentSettings.rows[0]?.settings || {};
+        
+        if (currency) settings.currency = currency;
+        if (low_stock_alerts !== undefined) settings.low_stock_alerts = low_stock_alerts;
+        if (language) settings.language = language;
+        
+        await pool.query(
+            'UPDATE businesses SET settings = $1, updated_at = NOW() WHERE id = $2',
+            [JSON.stringify(settings), req.user.business_id]
+        );
+        
+        res.json({ success: true, settings, message: 'Settings updated' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// DELETE PRODUCT (FIX)
+app.delete('/api/products/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await pool.query(
+            'UPDATE products SET is_active = false, updated_at = NOW() WHERE id = $1 AND business_id = $2 RETURNING id',
+            [id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
+        
+        res.json({ success: true, message: 'Product deleted' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// DELETE CUSTOMER
+app.delete('/api/customers/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await pool.query(
+            'UPDATE customers SET is_active = false, updated_at = NOW() WHERE id = $1 AND business_id = $2 RETURNING id',
+            [id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        
+        res.json({ success: true, message: 'Customer deleted' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
