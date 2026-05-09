@@ -400,59 +400,103 @@ app.delete('/api/products/:id', authenticate, authorize('owner', 'manager'), asy
     }
 });
 
-// ============================================
-// CUSTOMERS
-// ============================================
-app.get('/api/customers', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT * FROM customers WHERE business_id = $1 AND is_active = true ORDER BY full_name',
-            [req.user.business_id]
-        );
-        res.json({ customers: result.rows });
-    } catch (error) { 
-        res.status(500).json({ error: error.message }); 
-    }
-});
+// // ============================================
+// // CUSTOMERS
+// // ============================================
+// app.get('/api/customers', authenticate, async (req, res) => {
+//     try {
+//         const result = await pool.query(
+//             'SELECT * FROM customers WHERE business_id = $1 AND is_active = true ORDER BY full_name',
+//             [req.user.business_id]
+//         );
+//         res.json({ customers: result.rows });
+//     } catch (error) { 
+//         res.status(500).json({ error: error.message }); 
+//     }
+// });
 
+a// POST /api/customers - Add Customer
 app.post('/api/customers', authenticate, async (req, res) => {
-    try {
-        const { full_name, phone, credit_limit, email, address } = req.body;
-        if (!full_name) return res.status(400).json({ error: 'Name required' });
-        
-        const result = await pool.query(
-            `INSERT INTO customers (business_id, full_name, phone, credit_limit, email, address) 
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [req.user.business_id, full_name, phone, credit_limit || 0, email || null, address || null]
-        );
-        res.status(201).json({ success: true, customer_id: result.rows[0].id });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { 
+      full_name, phone, credit_limit, 
+      email, address, notes, preferred_contact_method, credit_score 
+    } = req.body;
+    
+    if (!full_name) return res.status(400).json({ error: 'Name required' });
+    
+    const result = await pool.query(
+      `INSERT INTO customers (
+        business_id, full_name, phone, credit_limit, 
+        email, address, notes, preferred_contact_method, credit_score
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [
+        req.user.business_id, full_name, phone || null, credit_limit || 0,
+        email || null, address || null, notes || null, 
+        preferred_contact_method || 'sms', credit_score || 0
+      ]
+    );
+    res.status(201).json({ success: true, customer_id: result.rows[0].id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// PUT /api/customers/:id - Update Customer
 app.put('/api/customers/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { full_name, phone, credit_limit, email, address } = req.body;
-        
-        const result = await pool.query(
-            `UPDATE customers SET 
-                full_name = COALESCE($1, full_name),
-                phone = COALESCE($2, phone),
-                credit_limit = COALESCE($3, credit_limit),
-                email = COALESCE($4, email),
-                address = COALESCE($5, address),
-                updated_at = NOW()
-             WHERE id = $6 AND business_id = $7 RETURNING *`,
-            [full_name, phone, credit_limit, email, address, id, req.user.business_id]
-        );
-        
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
-        res.json({ success: true, customer: result.rows[0], message: 'Customer updated' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+  try {
+    const { id } = req.params;
+    const { 
+      full_name, phone, credit_limit, 
+      email, address, notes, preferred_contact_method, credit_score 
+    } = req.body;
+    
+    const result = await pool.query(
+      `UPDATE customers SET 
+        full_name = COALESCE($1, full_name),
+        phone = COALESCE($2, phone),
+        credit_limit = COALESCE($3, credit_limit),
+        email = COALESCE($4, email),
+        address = COALESCE($5, address),
+        notes = COALESCE($6, notes),
+        preferred_contact_method = COALESCE($7, preferred_contact_method),
+        credit_score = COALESCE($8, credit_score),
+        updated_at = NOW()
+      WHERE id = $9 AND business_id = $10 RETURNING *`,
+      [
+        full_name, phone, credit_limit, 
+        email, address, notes, 
+        preferred_contact_method, credit_score,
+        id, req.user.business_id
+      ]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Customer not found' });
     }
+    
+    res.json({ success: true, customer: result.rows[0], message: 'Customer updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/customers - Get Customers (with all fields)
+app.get('/api/customers', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, full_name, phone, email, address, credit_limit, 
+              current_balance, credit_score, telegram_chat_id, 
+              preferred_contact_method, notes, is_active, created_at
+       FROM customers 
+       WHERE business_id = $1 AND is_active = true 
+       ORDER BY full_name`,
+      [req.user.business_id]
+    );
+    res.json({ customers: result.rows });
+  } catch (error) { 
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
 app.delete('/api/customers/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
