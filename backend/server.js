@@ -1866,6 +1866,136 @@ app.post('/api/delete-telegram-webhook', authenticate, async (req, res) => {
 });
 
 // ============================================
+// CASHIER PIN LOGIN
+// ============================================
+
+// Login with PIN code
+app.post('/api/auth/login-with-pin', async (req, res) => {
+    try {
+        const { pinCode } = req.body;
+        
+        if (!pinCode || pinCode.length < 4) {
+            return res.status(400).json({ error: 'Valid PIN code required' });
+        }
+        
+        // Find user by PIN code
+        const result = await pool.query(
+            `SELECT u.*, b.name as business_name, b.is_active as biz_active 
+             FROM users u 
+             JOIN businesses b ON u.business_id = b.id 
+             WHERE u.pin_code = $1 AND u.is_active = true AND u.role = 'cashier'`,
+            [pinCode]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid PIN code' });
+        }
+        
+        const user = result.rows[0];
+        if (!user.biz_active) {
+            return res.status(403).json({ error: 'Business account deactivated' });
+        }
+        
+        // Update last login
+        await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+        
+        // Generate token (cashier typically has limited access)
+        const token = jwt.sign(
+            { id: user.id, business_id: user.business_id, role: user.role },
+            process.env.JWT_SECRET || 'my-super-secret-key-2026',
+            { expiresIn: '8h' } // Shorter expiry for cashiers
+        );
+        
+        res.json({ 
+            success: true, 
+            token, 
+            user: { 
+                id: user.id, 
+                name: user.full_name, 
+                business_name: user.business_name, 
+                role: user.role,
+                is_cashier: true
+            } 
+        });
+        
+    } catch (error) {
+        console.error('PIN login error:', error);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Set/Update Cashier PIN (Owner/Manager only)
+app.post('/api/users/:id/set-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { pinCode } = req.body;
+        
+        if (!pinCode || pinCode.length < 4 || pinCode.length > 6) {
+            return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+        }
+        
+        // Verify user exists and is cashier
+        const user = await pool.query(
+            'SELECT role FROM users WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (user.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        if (user.rows[0].role !== 'cashier') {
+            return res.status(400).json({ error: 'PIN only available for cashiers' });
+        }
+        
+        // Update PIN
+        await pool.query(
+            'UPDATE users SET pin_code = $1, is_cashier = true, updated_at = NOW() WHERE id = $2',
+            [pinCode, id]
+        );
+        
+        res.json({ success: true, message: 'PIN code set successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Remove Cashier PIN
+app.delete('/api/users/:id/remove-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        await pool.query(
+            'UPDATE users SET pin_code = NULL, updated_at = NOW() WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        res.json({ success: true, message: 'PIN code removed successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Check if user has PIN set
+app.get('/api/users/:id/has-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await pool.query(
+            'SELECT pin_code IS NOT NULL as has_pin FROM users WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        res.json({ has_pin: result.rows[0]?.has_pin || false });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
