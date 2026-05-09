@@ -27,7 +27,7 @@ app.use(express.json());
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
-    max: 3,
+    max: 10,
     idleTimeoutMillis: 20000,
     connectionTimeoutMillis: 15000,
 });
@@ -70,8 +70,17 @@ function getEthiopianDate() {
     if (ethMonth > 12) ethMonth = 13;
     
     const ethMonths = ['Meskerem', 'Tikimt', 'Hidar', 'Tahsas', 'Tir', 'Yekatit', 'Megabit', 'Miazia', 'Ginbot', 'Sene', 'Hamle', 'Nehase', 'Pagume'];
+    const ethMonthsAm = ['መስከረም', 'ጥቅምት', 'ህዳር', 'ታህሳስ', 'ጥር', 'የካቲት', 'መጋቢት', 'ሚያዚያ', 'ግንቦት', 'ሰኔ', 'ሐምሌ', 'ነሐሴ', 'ጳጉሜ'];
     
-    return `${ethDay} ${ethMonths[ethMonth - 1]} ${ethYear}`;
+    return {
+        en: `${ethDay} ${ethMonths[ethMonth - 1]} ${ethYear}`,
+        am: `${ethDay} ${ethMonthsAm[ethMonth - 1]} ${ethYear}`,
+        day: ethDay,
+        month: ethMonth,
+        year: ethYear,
+        monthNameEn: ethMonths[ethMonth - 1],
+        monthNameAm: ethMonthsAm[ethMonth - 1]
+    };
 }
 
 // ============================================
@@ -126,8 +135,8 @@ app.post('/api/auth/register', async (req, res) => {
         }
         
         const bizResult = await pool.query(
-            'INSERT INTO businesses (name, owner_name, phone) VALUES ($1, $2, $3) RETURNING id',
-            [business_name, owner_name, phone]
+            'INSERT INTO businesses (name, owner_name, phone, tax_type, tax_rate, show_tax_on_receipt) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [business_name, owner_name, phone, 'none', 0, false]
         );
         const businessId = bizResult.rows[0].id;
         
@@ -225,7 +234,8 @@ app.put('/api/auth/change-password', authenticate, async (req, res) => {
 app.get('/api/business/profile', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT id, name, owner_name, phone, email, city, tin_number, tax_type, tax_rate, show_tax_on_receipt, subscription_tier FROM businesses WHERE id = $1',
+            `SELECT id, name, owner_name, phone, email, city, tin_number, tax_type, tax_rate, show_tax_on_receipt, subscription_tier 
+             FROM businesses WHERE id = $1`,
             [req.user.business_id]
         );
         if (result.rows.length === 0) return res.status(404).json({ error: 'Business not found' });
@@ -299,13 +309,26 @@ app.put('/api/business/settings', authenticate, async (req, res) => {
     }
 });
 
+// Get tax settings
+app.get('/api/business/tax-settings', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT tin_number, tax_type, tax_rate, show_tax_on_receipt FROM businesses WHERE id = $1',
+            [req.user.business_id]
+        );
+        res.json({ settings: result.rows[0] || { tax_type: 'none', tax_rate: 0, show_tax_on_receipt: false } });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ============================================
 // PRODUCTS
 // ============================================
 app.get('/api/products', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT * FROM products WHERE business_id = $1 AND is_active = true ORDER BY created_at DESC',
+            `SELECT * FROM products WHERE business_id = $1 AND is_active = true ORDER BY created_at DESC`,
             [req.user.business_id]
         );
         res.json({ products: result.rows });
@@ -316,14 +339,14 @@ app.get('/api/products', authenticate, async (req, res) => {
 
 app.post('/api/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const { name_translations, barcode, cost_price, selling_price, current_stock, unit } = req.body;
+        const { name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number } = req.body;
         if (!name_translations || !cost_price || !selling_price) {
             return res.status(400).json({ error: 'Name, cost price, and selling price required' });
         }
         const result = await pool.query(
-            `INSERT INTO products (business_id, name_translations, barcode, cost_price, selling_price, current_stock, unit) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-            [req.user.business_id, JSON.stringify(name_translations), barcode, cost_price, selling_price, current_stock || 0, unit || 'piece']
+            `INSERT INTO products (business_id, name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+            [req.user.business_id, JSON.stringify(name_translations), barcode, cost_price, selling_price, current_stock || 0, unit || 'piece', track_expiry || false, expiry_date || null, batch_number || null]
         );
         res.status(201).json({ success: true, product_id: result.rows[0].id });
     } catch (error) { 
@@ -334,7 +357,7 @@ app.post('/api/products', authenticate, authorize('owner', 'manager'), async (re
 app.put('/api/products/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { name_translations, barcode, cost_price, selling_price, current_stock, unit, category_id } = req.body;
+        const { name_translations, barcode, cost_price, selling_price, current_stock, unit, category_id, track_expiry, expiry_date, batch_number } = req.body;
         
         const result = await pool.query(
             `UPDATE products SET 
@@ -345,9 +368,12 @@ app.put('/api/products/:id', authenticate, authorize('owner', 'manager'), async 
                 current_stock = COALESCE($5, current_stock),
                 unit = COALESCE($6, unit),
                 category_id = COALESCE($7, category_id),
+                track_expiry = COALESCE($8, track_expiry),
+                expiry_date = COALESCE($9, expiry_date),
+                batch_number = COALESCE($10, batch_number),
                 updated_at = NOW()
-             WHERE id = $8 AND business_id = $9 RETURNING *`,
-            [name_translations ? JSON.stringify(name_translations) : null, barcode, cost_price, selling_price, current_stock, unit, category_id, id, req.user.business_id]
+             WHERE id = $11 AND business_id = $12 RETURNING *`,
+            [name_translations ? JSON.stringify(name_translations) : null, barcode, cost_price, selling_price, current_stock, unit, category_id, track_expiry, expiry_date, batch_number, id, req.user.business_id]
         );
         
         if (result.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
@@ -388,12 +414,13 @@ app.get('/api/customers', authenticate, async (req, res) => {
 
 app.post('/api/customers', authenticate, async (req, res) => {
     try {
-        const { full_name, phone, credit_limit } = req.body;
+        const { full_name, phone, credit_limit, email, address } = req.body;
         if (!full_name) return res.status(400).json({ error: 'Name required' });
         
         const result = await pool.query(
-            'INSERT INTO customers (business_id, full_name, phone, credit_limit) VALUES ($1, $2, $3, $4) RETURNING id',
-            [req.user.business_id, full_name, phone, credit_limit || 0]
+            `INSERT INTO customers (business_id, full_name, phone, credit_limit, email, address) 
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+            [req.user.business_id, full_name, phone, credit_limit || 0, email || null, address || null]
         );
         res.status(201).json({ success: true, customer_id: result.rows[0].id });
     } catch (error) {
@@ -404,16 +431,18 @@ app.post('/api/customers', authenticate, async (req, res) => {
 app.put('/api/customers/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { full_name, phone, credit_limit } = req.body;
+        const { full_name, phone, credit_limit, email, address } = req.body;
         
         const result = await pool.query(
             `UPDATE customers SET 
                 full_name = COALESCE($1, full_name),
                 phone = COALESCE($2, phone),
                 credit_limit = COALESCE($3, credit_limit),
+                email = COALESCE($4, email),
+                address = COALESCE($5, address),
                 updated_at = NOW()
-             WHERE id = $4 AND business_id = $5 RETURNING *`,
-            [full_name, phone, credit_limit, id, req.user.business_id]
+             WHERE id = $6 AND business_id = $7 RETURNING *`,
+            [full_name, phone, credit_limit, email, address, id, req.user.business_id]
         );
         
         if (result.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
@@ -437,26 +466,66 @@ app.delete('/api/customers/:id', authenticate, authorize('owner', 'manager'), as
     }
 });
 
+// Customer payments
+app.post('/api/customers/:id/payment', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, payment_method } = req.body;
+        
+        const customer = await pool.query('SELECT * FROM customers WHERE id = $1 AND business_id = $2', [id, req.user.business_id]);
+        if (customer.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        
+        const newBalance = customer.rows[0].current_balance - parseFloat(amount);
+        await pool.query('UPDATE customers SET current_balance = $1, updated_at = NOW() WHERE id = $2', [newBalance, id]);
+        await pool.query(
+            `INSERT INTO credit_transactions (business_id, customer_id, user_id, transaction_type, amount, balance_after, payment_method) 
+             VALUES ($1, $2, $3, 'payment', $4, $5, $6)`,
+            [req.user.business_id, id, req.user.id, amount, newBalance, payment_method || 'cash']
+        );
+        
+        res.json({ success: true, new_balance: newBalance, message: 'Payment recorded' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/customers/:id/history', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query(
+            `SELECT * FROM credit_transactions WHERE customer_id = $1 AND business_id = $2 ORDER BY created_at DESC`,
+            [id, req.user.business_id]
+        );
+        res.json({ transactions: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ============================================
-// SALES
+// SALES (UPDATED with Tax Rate and Guarantor)
 // ============================================
 app.post('/api/sales', authenticate, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        const { items, customer_id, payment_method, amount_paid, payment_status, guarantor_name, guarantor_phone, guarantor_id_number } = req.body;
+        const { items, customer_id, payment_method, amount_paid, payment_status, guarantor_name, guarantor_phone, guarantor_id_number, tax_rate, subtotal: reqSubtotal, tax_amount: reqTaxAmount } = req.body;
         
         if (!items || items.length === 0) {
             return res.status(400).json({ error: 'No items in sale' });
         }
         
+        // Get business tax settings
         const businessResult = await client.query(
-            'SELECT tax_type, tax_rate, tin_number, show_tax_on_receipt FROM businesses WHERE id = $1',
+            'SELECT tax_type, tax_rate, tin_number, show_tax_on_receipt, name FROM businesses WHERE id = $1',
             [req.user.business_id]
         );
         const business = businessResult.rows[0];
         const taxType = business?.tax_type || 'none';
-        const taxRate = business?.tax_rate || 0;
+        const businessTaxRate = business?.tax_rate || 0;
+        
+        // Use provided tax_rate or business default
+        const effectiveTaxRate = tax_rate !== undefined ? tax_rate : businessTaxRate;
         
         let subtotal = 0;
         const saleItems = [];
@@ -482,12 +551,15 @@ app.post('/api/sales', authenticate, async (req, res) => {
             });
         }
         
-        let taxAmount = 0;
-        switch (taxType) {
-            case 'vat_15': taxAmount = parseFloat((subtotal * 0.15).toFixed(2)); break;
-            case 'tot_2': taxAmount = parseFloat((subtotal * 0.02).toFixed(2)); break;
-            case 'custom': taxAmount = parseFloat((subtotal * (taxRate / 100)).toFixed(2)); break;
-            default: taxAmount = 0;
+        // Calculate tax
+        let taxAmount = reqTaxAmount !== undefined ? reqTaxAmount : 0;
+        if (reqTaxAmount === undefined) {
+            switch (taxType) {
+                case 'vat_15': taxAmount = parseFloat((subtotal * 0.15).toFixed(2)); break;
+                case 'tot_2': taxAmount = parseFloat((subtotal * 0.02).toFixed(2)); break;
+                case 'custom': taxAmount = parseFloat((subtotal * (effectiveTaxRate / 100)).toFixed(2)); break;
+                default: taxAmount = 0;
+            }
         }
         
         const totalAmount = parseFloat((subtotal + taxAmount).toFixed(2));
@@ -502,7 +574,7 @@ app.post('/api/sales', authenticate, async (req, res) => {
                 subtotal, discount_amount, tax_amount, total_amount, amount_paid, 
                 payment_status, payment_method, status
             ) VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8, $9, $10, $11, $12, 'completed') RETURNING id`,
-            [req.user.business_id, req.user.id, customer_id || null, saleNumber, ethiopianDate,
+            [req.user.business_id, req.user.id, customer_id || null, saleNumber, JSON.stringify(ethiopianDate),
              subtotal, 0, taxAmount, totalAmount, paidAmount, isCredit ? 'credit' : 'paid', payment_method || 'cash']
         );
         
@@ -515,6 +587,7 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
             await client.query('UPDATE products SET current_stock = current_stock - $1, updated_at = NOW() WHERE id = $2', [item.quantity, item.product_id]);
             
+            // Record stock transaction
             await client.query(
                 `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
                  VALUES ($1, $2, $3, 'sale', $4, $5)`,
@@ -541,10 +614,11 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
         }
         
+        // Record action log
         await client.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'sale', 'sale', $3, $4)`,
-            [req.user.business_id, req.user.id, saleId, JSON.stringify({ sale_number: saleNumber, total: totalAmount, is_credit: isCredit })]
+            [req.user.business_id, req.user.id, saleId, JSON.stringify({ sale_number: saleNumber, total: totalAmount, is_credit: isCredit, tax_type: taxType, tax_amount: taxAmount })]
         );
         
         await client.query('COMMIT');
@@ -552,9 +626,10 @@ app.post('/api/sales', authenticate, async (req, res) => {
         res.status(201).json({ 
             success: true, sale_id: saleId, sale_number: saleNumber,
             total_amount: totalAmount, subtotal: subtotal, tax_amount: taxAmount,
-            tax_type: taxType, items_sold: saleItems.length, is_credit: isCredit,
+            tax_type: taxType, tax_rate: effectiveTaxRate, items_sold: saleItems.length, is_credit: isCredit,
             ethiopian_date: ethiopianDate, customer_name: customerName,
-            guarantor_name: guarantor_name || null
+            guarantor_name: guarantor_name || null,
+            business_name: business.name
         });
     } catch (error) {
         await client.query('ROLLBACK');
@@ -572,7 +647,7 @@ app.get('/api/sales', authenticate, async (req, res) => {
             FROM sales s
             LEFT JOIN customers c ON s.customer_id = c.id
             LEFT JOIN users u ON s.user_id = u.id
-            WHERE s.business_id = $1
+            WHERE s.business_id = $1 AND s.status = 'completed'
         `;
         const params = [req.user.business_id];
         let paramCount = 2;
@@ -591,27 +666,6 @@ app.get('/api/sales', authenticate, async (req, res) => {
     }
 });
 
-app.get('/api/sales/:id', authenticate, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const saleResult = await pool.query(
-            `SELECT s.*, c.full_name as customer_name, u.full_name as cashier_name
-             FROM sales s LEFT JOIN customers c ON s.customer_id = c.id LEFT JOIN users u ON s.user_id = u.id
-             WHERE s.id = $1 AND s.business_id = $2`,
-            [id, req.user.business_id]
-        );
-        if (saleResult.rows.length === 0) return res.status(404).json({ error: 'Sale not found' });
-        
-        const itemsResult = await pool.query(
-            `SELECT si.*, p.name_translations FROM sale_items si JOIN products p ON si.product_id = p.id WHERE si.sale_id = $1`,
-            [id]
-        );
-        res.json({ sale: saleResult.rows[0], items: itemsResult.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), async (req, res) => {
     const client = await pool.connect();
     try {
@@ -623,7 +677,10 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
         if (sale.rows.length === 0) return res.status(404).json({ error: 'Sale not found' });
         if (sale.rows[0].status === 'voided') return res.status(400).json({ error: 'Sale already voided' });
         
-        await client.query(`UPDATE sales SET status = 'voided', void_reason = $1, voided_by = $2, voided_at = NOW(), updated_at = NOW() WHERE id = $3`, [reason || 'No reason provided', req.user.id, id]);
+        await client.query(
+            `UPDATE sales SET status = 'voided', void_reason = $1, voided_by = $2, voided_at = NOW(), updated_at = NOW() WHERE id = $3`,
+            [reason || 'No reason provided', req.user.id, id]
+        );
         
         const items = await client.query('SELECT * FROM sale_items WHERE sale_id = $1', [id]);
         for (const item of items.rows) {
@@ -643,44 +700,307 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
 });
 
 // ============================================
-// CUSTOMER PAYMENTS & HISTORY
+// REPORTS (Updated with Tax and Ethiopian Date)
 // ============================================
-app.post('/api/customers/:id/payment', authenticate, async (req, res) => {
+app.get('/api/reports/daily', authenticate, async (req, res) => {
     try {
-        const { id } = req.params;
-        const { amount, payment_method } = req.body;
+        const today = req.query.date || new Date().toISOString().split('T')[0];
         
-        const customer = await pool.query('SELECT * FROM customers WHERE id = $1 AND business_id = $2', [id, req.user.business_id]);
-        if (customer.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales, 
+                COALESCE(SUM(total_amount), 0) as total_revenue, 
+                COALESCE(SUM(tax_amount), 0) as total_tax, 
+                COUNT(DISTINCT customer_id) as unique_customers 
+            FROM sales 
+            WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+        `, [req.user.business_id, today]);
         
-        const newBalance = customer.rows[0].current_balance - parseFloat(amount);
-        await pool.query('UPDATE customers SET current_balance = $1, updated_at = NOW() WHERE id = $2', [newBalance, id]);
-        await pool.query(`INSERT INTO credit_transactions (business_id, customer_id, user_id, transaction_type, amount, balance_after, payment_method) VALUES ($1, $2, $3, 'payment', $4, $5, $6)`, [req.user.business_id, id, req.user.id, amount, newBalance, payment_method || 'cash']);
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
+            FROM sale_items si 
+            JOIN sales s ON si.sale_id = s.id 
+            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+        `, [req.user.business_id, today]);
         
-        res.json({ success: true, new_balance: newBalance, message: 'Payment recorded' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.json({ date: today, ...result.rows[0], gross_profit: profitResult.rows[0].gross_profit });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
     }
 });
 
-app.get('/api/customers/:id/history', authenticate, async (req, res) => {
+app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const { id } = req.params;
-        const result = await pool.query(`SELECT * FROM credit_transactions WHERE customer_id = $1 AND business_id = $2 ORDER BY created_at DESC`, [id, req.user.business_id]);
-        res.json({ transactions: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+        const { month, year } = req.query;
+        const targetMonth = month || new Date().getMonth() + 1;
+        const targetYear = year || new Date().getFullYear();
+        
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales, 
+                COALESCE(SUM(total_amount), 0) as total_revenue, 
+                COALESCE(SUM(tax_amount), 0) as total_tax, 
+                COALESCE(SUM(discount_amount), 0) as total_discounts, 
+                COUNT(DISTINCT customer_id) as unique_customers, 
+                COUNT(DISTINCT sale_date) as active_days 
+            FROM sales 
+            WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM sale_date) = $2 
+            AND EXTRACT(YEAR FROM sale_date) = $3 
+            AND status = 'completed'
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
+            FROM sale_items si 
+            JOIN sales s ON si.sale_id = s.id 
+            WHERE s.business_id = $1 
+            AND EXTRACT(MONTH FROM s.sale_date) = $2 
+            AND EXTRACT(YEAR FROM s.sale_date) = $3
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        const expenseResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            FROM expenses 
+            WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM expense_date) = $2 
+            AND EXTRACT(YEAR FROM expense_date) = $3
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        res.json({ 
+            period: 'monthly', 
+            month: parseInt(targetMonth), 
+            year: parseInt(targetYear), 
+            ...result.rows[0], 
+            gross_profit: grossProfit, 
+            total_expenses: totalExpenses, 
+            net_profit: grossProfit - totalExpenses 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
     }
 });
 
-// ============================================
-// DEBT AGING REPORT
-// ============================================
+app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { year } = req.query;
+        const targetYear = year || new Date().getFullYear();
+        
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales, 
+                COALESCE(SUM(total_amount), 0) as total_revenue, 
+                COALESCE(SUM(tax_amount), 0) as total_tax, 
+                COUNT(DISTINCT customer_id) as unique_customers, 
+                COUNT(DISTINCT EXTRACT(MONTH FROM sale_date)) as active_months 
+            FROM sales 
+            WHERE business_id = $1 
+            AND EXTRACT(YEAR FROM sale_date) = $2 
+            AND status = 'completed'
+        `, [req.user.business_id, targetYear]);
+        
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
+            FROM sale_items si 
+            JOIN sales s ON si.sale_id = s.id 
+            WHERE s.business_id = $1 
+            AND EXTRACT(YEAR FROM s.sale_date) = $2
+        `, [req.user.business_id, targetYear]);
+        
+        const expenseResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            FROM expenses 
+            WHERE business_id = $1 
+            AND EXTRACT(YEAR FROM expense_date) = $2
+        `, [req.user.business_id, targetYear]);
+        
+        const monthlyBreakdown = await pool.query(`
+            SELECT 
+                EXTRACT(MONTH FROM sale_date) as month, 
+                COUNT(*) as sales_count, 
+                COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales 
+            WHERE business_id = $1 
+            AND EXTRACT(YEAR FROM sale_date) = $2 
+            AND status = 'completed'
+            GROUP BY EXTRACT(MONTH FROM sale_date) 
+            ORDER BY month
+        `, [req.user.business_id, targetYear]);
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        res.json({ 
+            period: 'yearly', 
+            year: parseInt(targetYear), 
+            ...result.rows[0], 
+            gross_profit: grossProfit, 
+            total_expenses: totalExpenses, 
+            net_profit: grossProfit - totalExpenses, 
+            monthly_breakdown: monthlyBreakdown.rows 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
+});
+
+app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { quarter, year } = req.query;
+        const targetQuarter = quarter || Math.ceil((new Date().getMonth() + 1) / 3);
+        const targetYear = year || new Date().getFullYear();
+        const startMonth = (targetQuarter - 1) * 3 + 1;
+        const endMonth = startMonth + 2;
+        
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales, 
+                COALESCE(SUM(total_amount), 0) as total_revenue, 
+                COALESCE(SUM(tax_amount), 0) as total_tax, 
+                COUNT(DISTINCT customer_id) as unique_customers, 
+                COUNT(DISTINCT sale_date) as active_days 
+            FROM sales 
+            WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM sale_date) BETWEEN $2 AND $3 
+            AND EXTRACT(YEAR FROM sale_date) = $4 
+            AND status = 'completed'
+        `, [req.user.business_id, startMonth, endMonth, targetYear]);
+        
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
+            FROM sale_items si 
+            JOIN sales s ON si.sale_id = s.id 
+            WHERE s.business_id = $1 
+            AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $2 AND $3 
+            AND EXTRACT(YEAR FROM s.sale_date) = $4
+        `, [req.user.business_id, startMonth, endMonth, targetYear]);
+        
+        const expenseResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            FROM expenses 
+            WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM expense_date) BETWEEN $2 AND $3 
+            AND EXTRACT(YEAR FROM expense_date) = $4
+        `, [req.user.business_id, startMonth, endMonth, targetYear]);
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        res.json({ 
+            period: 'quarterly', 
+            quarter: parseInt(targetQuarter), 
+            year: parseInt(targetYear), 
+            months: `${startMonth}-${endMonth}`, 
+            ...result.rows[0], 
+            gross_profit: grossProfit, 
+            total_expenses: totalExpenses, 
+            net_profit: grossProfit - totalExpenses 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
+});
+
+app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { from, to } = req.query;
+        if (!from || !to) return res.status(400).json({ error: 'From and To dates required' });
+        
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales, 
+                COALESCE(SUM(total_amount), 0) as total_revenue, 
+                COALESCE(SUM(tax_amount), 0) as total_tax, 
+                COALESCE(SUM(discount_amount), 0) as total_discounts, 
+                COUNT(DISTINCT customer_id) as unique_customers, 
+                COUNT(DISTINCT sale_date) as active_days 
+            FROM sales 
+            WHERE business_id = $1 
+            AND sale_date BETWEEN $2 AND $3 
+            AND status = 'completed'
+        `, [req.user.business_id, from, to]);
+        
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
+            FROM sale_items si 
+            JOIN sales s ON si.sale_id = s.id 
+            WHERE s.business_id = $1 
+            AND s.sale_date BETWEEN $2 AND $3
+        `, [req.user.business_id, from, to]);
+        
+        const expenseResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            FROM expenses 
+            WHERE business_id = $1 
+            AND expense_date BETWEEN $2 AND $3
+        `, [req.user.business_id, from, to]);
+        
+        const totalExpenses = expenseResult.rows[0].total_expenses;
+        const grossProfit = profitResult.rows[0].gross_profit;
+        res.json({ 
+            period: 'custom', 
+            from, to, 
+            ...result.rows[0], 
+            gross_profit: grossProfit, 
+            total_expenses: totalExpenses, 
+            net_profit: grossProfit - totalExpenses 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
+});
+
+app.get('/api/reports/summary', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const thisMonth = new Date().getMonth() + 1;
+        const thisYear = new Date().getFullYear();
+        
+        const todayResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+        `, [req.user.business_id, today]);
+        
+        const monthResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM sale_date) = $2 
+            AND EXTRACT(YEAR FROM sale_date) = $3 
+            AND status = 'completed'
+        `, [req.user.business_id, thisMonth, thisYear]);
+        
+        const yearResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 
+            AND EXTRACT(YEAR FROM sale_date) = $2 
+            AND status = 'completed'
+        `, [req.user.business_id, thisYear]);
+        
+        const totalResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 AND status = 'completed'
+        `, [req.user.business_id]);
+        
+        res.json({ 
+            today: todayResult.rows[0], 
+            this_month: monthResult.rows[0], 
+            this_year: yearResult.rows[0], 
+            all_time: totalResult.rows[0] 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
+});
+
+// Debt Aging Report
 app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
     try {
         const result = await pool.query(`
             SELECT 
-                c.id as customer_id, c.full_name as customer_name, c.phone, c.current_balance,
+                c.id as customer_id, 
+                c.full_name as customer_name, 
+                c.phone, 
+                c.current_balance,
                 COALESCE(SUM(CASE WHEN ct.created_at > NOW() - INTERVAL '7 days' THEN ct.amount ELSE 0 END), 0) as week1_debt,
                 COALESCE(SUM(CASE WHEN ct.created_at BETWEEN NOW() - INTERVAL '30 days' AND NOW() - INTERVAL '8 days' THEN ct.amount ELSE 0 END), 0) as month1_debt,
                 COALESCE(SUM(CASE WHEN ct.created_at < NOW() - INTERVAL '30 days' THEN ct.amount ELSE 0 END), 0) as older_debt
@@ -697,114 +1017,34 @@ app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
 });
 
 // ============================================
-// REPORT ENDPOINTS
-// ============================================
-app.get('/api/reports/daily', authenticate, async (req, res) => {
-    try {
-        const today = req.query.date || new Date().toISOString().split('T')[0];
-        const result = await pool.query(`SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COUNT(DISTINCT customer_id) as unique_customers FROM sales WHERE business_id = $1 AND sale_date = $2`, [req.user.business_id, today]);
-        const profitResult = await pool.query(`SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE s.business_id = $1 AND s.sale_date = $2`, [req.user.business_id, today]);
-        res.json({ date: today, ...result.rows[0], gross_profit: profitResult.rows[0].gross_profit });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { month, year } = req.query;
-        const targetMonth = month || new Date().getMonth() + 1;
-        const targetYear = year || new Date().getFullYear();
-        
-        const result = await pool.query(`SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COALESCE(SUM(discount_amount), 0) as total_discounts, COUNT(DISTINCT customer_id) as unique_customers, COUNT(DISTINCT sale_date) as active_days FROM sales WHERE business_id = $1 AND EXTRACT(MONTH FROM sale_date) = $2 AND EXTRACT(YEAR FROM sale_date) = $3`, [req.user.business_id, targetMonth, targetYear]);
-        const profitResult = await pool.query(`SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE s.business_id = $1 AND EXTRACT(MONTH FROM s.sale_date) = $2 AND EXTRACT(YEAR FROM s.sale_date) = $3`, [req.user.business_id, targetMonth, targetYear]);
-        const expenseResult = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total_expenses FROM expenses WHERE business_id = $1 AND EXTRACT(MONTH FROM expense_date) = $2 AND EXTRACT(YEAR FROM expense_date) = $3`, [req.user.business_id, targetMonth, targetYear]);
-        
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
-        res.json({ period: 'monthly', month: parseInt(targetMonth), year: parseInt(targetYear), ...result.rows[0], gross_profit: grossProfit, total_expenses: totalExpenses, net_profit: grossProfit - totalExpenses });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { year } = req.query;
-        const targetYear = year || new Date().getFullYear();
-        
-        const result = await pool.query(`SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COUNT(DISTINCT customer_id) as unique_customers, COUNT(DISTINCT EXTRACT(MONTH FROM sale_date)) as active_months FROM sales WHERE business_id = $1 AND EXTRACT(YEAR FROM sale_date) = $2`, [req.user.business_id, targetYear]);
-        const profitResult = await pool.query(`SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE s.business_id = $1 AND EXTRACT(YEAR FROM s.sale_date) = $2`, [req.user.business_id, targetYear]);
-        const expenseResult = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total_expenses FROM expenses WHERE business_id = $1 AND EXTRACT(YEAR FROM expense_date) = $2`, [req.user.business_id, targetYear]);
-        const monthlyBreakdown = await pool.query(`SELECT EXTRACT(MONTH FROM sale_date) as month, COUNT(*) as sales_count, COALESCE(SUM(total_amount), 0) as revenue FROM sales WHERE business_id = $1 AND EXTRACT(YEAR FROM sale_date) = $2 GROUP BY EXTRACT(MONTH FROM sale_date) ORDER BY month`, [req.user.business_id, targetYear]);
-        
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
-        res.json({ period: 'yearly', year: parseInt(targetYear), ...result.rows[0], gross_profit: grossProfit, total_expenses: totalExpenses, net_profit: grossProfit - totalExpenses, monthly_breakdown: monthlyBreakdown.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { quarter, year } = req.query;
-        const targetQuarter = quarter || Math.ceil((new Date().getMonth() + 1) / 3);
-        const targetYear = year || new Date().getFullYear();
-        const startMonth = (targetQuarter - 1) * 3 + 1;
-        const endMonth = startMonth + 2;
-        
-        const result = await pool.query(`SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COUNT(DISTINCT customer_id) as unique_customers, COUNT(DISTINCT sale_date) as active_days FROM sales WHERE business_id = $1 AND EXTRACT(MONTH FROM sale_date) BETWEEN $2 AND $3 AND EXTRACT(YEAR FROM sale_date) = $4`, [req.user.business_id, startMonth, endMonth, targetYear]);
-        const profitResult = await pool.query(`SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE s.business_id = $1 AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $2 AND $3 AND EXTRACT(YEAR FROM s.sale_date) = $4`, [req.user.business_id, startMonth, endMonth, targetYear]);
-        const expenseResult = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total_expenses FROM expenses WHERE business_id = $1 AND EXTRACT(MONTH FROM expense_date) BETWEEN $2 AND $3 AND EXTRACT(YEAR FROM expense_date) = $4`, [req.user.business_id, startMonth, endMonth, targetYear]);
-        
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
-        res.json({ period: 'quarterly', quarter: parseInt(targetQuarter), year: parseInt(targetYear), months: `${startMonth}-${endMonth}`, ...result.rows[0], gross_profit: grossProfit, total_expenses: totalExpenses, net_profit: grossProfit - totalExpenses });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { from, to } = req.query;
-        if (!from || !to) return res.status(400).json({ error: 'From and To dates required' });
-        
-        const result = await pool.query(`SELECT COUNT(*) as total_sales, COALESCE(SUM(total_amount), 0) as total_revenue, COALESCE(SUM(tax_amount), 0) as total_tax, COALESCE(SUM(discount_amount), 0) as total_discounts, COUNT(DISTINCT customer_id) as unique_customers, COUNT(DISTINCT sale_date) as active_days FROM sales WHERE business_id = $1 AND sale_date BETWEEN $2 AND $3`, [req.user.business_id, from, to]);
-        const profitResult = await pool.query(`SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE s.business_id = $1 AND s.sale_date BETWEEN $2 AND $3`, [req.user.business_id, from, to]);
-        const expenseResult = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total_expenses FROM expenses WHERE business_id = $1 AND expense_date BETWEEN $2 AND $3`, [req.user.business_id, from, to]);
-        
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
-        res.json({ period: 'custom', from, to, ...result.rows[0], gross_profit: grossProfit, total_expenses: totalExpenses, net_profit: grossProfit - totalExpenses });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/reports/summary', authenticate, async (req, res) => {
-    try {
-        const today = new Date().toISOString().split('T')[0];
-        const thisMonth = new Date().getMonth() + 1;
-        const thisYear = new Date().getFullYear();
-        
-        const todayResult = await pool.query(`SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue FROM sales WHERE business_id = $1 AND sale_date = $2`, [req.user.business_id, today]);
-        const monthResult = await pool.query(`SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue FROM sales WHERE business_id = $1 AND EXTRACT(MONTH FROM sale_date) = $2 AND EXTRACT(YEAR FROM sale_date) = $3`, [req.user.business_id, thisMonth, thisYear]);
-        const yearResult = await pool.query(`SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue FROM sales WHERE business_id = $1 AND EXTRACT(YEAR FROM sale_date) = $2`, [req.user.business_id, thisYear]);
-        const totalResult = await pool.query(`SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue FROM sales WHERE business_id = $1`, [req.user.business_id]);
-        
-        res.json({ today: todayResult.rows[0], this_month: monthResult.rows[0], this_year: yearResult.rows[0], all_time: totalResult.rows[0] });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// ============================================
 // EXPENSES
 // ============================================
 app.get('/api/expenses', authenticate, async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM expenses WHERE business_id = $1 ORDER BY expense_date DESC LIMIT 50', [req.user.business_id]);
+        const result = await pool.query(
+            'SELECT * FROM expenses WHERE business_id = $1 ORDER BY expense_date DESC LIMIT 50',
+            [req.user.business_id]
+        );
         res.json({ expenses: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 app.post('/api/expenses', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const { category, amount, description, expense_date } = req.body;
+        const { category, amount, description, expense_date, receipt_image } = req.body;
         if (!category || !amount) return res.status(400).json({ error: 'Category and amount required' });
-        const result = await pool.query('INSERT INTO expenses (business_id, user_id, category, amount, description, expense_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', [req.user.business_id, req.user.id, category, amount, description, expense_date || new Date().toISOString().split('T')[0]]);
+        
+        const result = await pool.query(
+            `INSERT INTO expenses (business_id, user_id, category, amount, description, expense_date, receipt_image) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [req.user.business_id, req.user.id, category, amount, description, expense_date || new Date().toISOString().split('T')[0], receipt_image || null]
+        );
         res.status(201).json({ success: true, expense_id: result.rows[0].id });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // ============================================
@@ -822,23 +1062,44 @@ app.post('/api/inventory/adjust', authenticate, authorize('owner', 'manager'), a
         if (newStock < 0) return res.status(400).json({ error: 'Insufficient stock' });
         
         await pool.query('UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2', [newStock, product_id]);
-        await pool.query(`INSERT INTO stock_adjustments (business_id, product_id, user_id, adjustment_type, quantity, direction, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]);
+        await pool.query(
+            `INSERT INTO stock_adjustments (business_id, product_id, user_id, adjustment_type, quantity, direction, reason) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]
+        );
+        
+        // Record stock transaction
+        await pool.query(
+            `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
+             VALUES ($1, $2, $3, 'adjustment', $4, $5)`,
+            [req.user.business_id, product_id, req.user.id, direction === 'in' ? quantity : -quantity, reason || 'Stock adjustment']
+        );
         
         res.json({ success: true, message: `Stock ${direction === 'in' ? 'increased' : 'decreased'} by ${quantity}`, new_stock: newStock });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 app.get('/api/inventory/adjustments', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const result = await pool.query(`SELECT sa.*, p.name_translations as product_name FROM stock_adjustments sa JOIN products p ON sa.product_id = p.id WHERE sa.business_id = $1 ORDER BY sa.created_at DESC LIMIT 50`, [req.user.business_id]);
+        const result = await pool.query(`
+            SELECT sa.*, p.name_translations as product_name 
+            FROM stock_adjustments sa 
+            JOIN products p ON sa.product_id = p.id 
+            WHERE sa.business_id = $1 
+            ORDER BY sa.created_at DESC 
+            LIMIT 50
+        `, [req.user.business_id]);
         res.json({ adjustments: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
-// ============================================
-// DAILY CASH-OUT (Z-REPORT) ENDPOINTS
-// ============================================
 
-// Get current day's cash-out status
+// ============================================
+// DAILY CASH-OUT (Z-REPORT)
+// ============================================
 app.get('/api/cashout/status', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -848,21 +1109,16 @@ app.get('/api/cashout/status', authenticate, async (req, res) => {
         );
         
         const isClosed = result.rows.length > 0 && result.rows[0].is_closed;
-        res.json({ 
-            is_closed: isClosed,
-            cashout: result.rows[0] || null
-        });
+        res.json({ is_closed: isClosed, cashout: result.rows[0] || null });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get daily sales summary for cash-out
 app.get('/api/cashout/summary', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
         
-        // Get sales summary
         const salesResult = await pool.query(`
             SELECT 
                 COUNT(*) as total_transactions,
@@ -870,22 +1126,17 @@ app.get('/api/cashout/summary', authenticate, async (req, res) => {
                 COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total_amount ELSE 0 END), 0) as cash_sales,
                 COALESCE(SUM(CASE WHEN payment_method = 'credit' THEN total_amount ELSE 0 END), 0) as credit_sales,
                 COALESCE(SUM(CASE WHEN payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN total_amount ELSE 0 END), 0) as electronic_sales,
-                COALESCE(SUM(CASE WHEN payment_method = 'telebirr' THEN total_amount ELSE 0 END), 0) as telebirr,
-                COALESCE(SUM(CASE WHEN payment_method = 'cbe_birr' THEN total_amount ELSE 0 END), 0) as cbe_birr,
-                COALESCE(SUM(CASE WHEN payment_method = 'bank_transfer' THEN total_amount ELSE 0 END), 0) as bank_transfer,
                 COALESCE(SUM(tax_amount), 0) as total_tax
             FROM sales 
             WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Get today's expenses
         const expensesResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses 
             WHERE business_id = $1 AND expense_date = $2
         `, [req.user.business_id, today]);
         
-        // Get previous day's closing balance (opening balance for today)
         const prevDay = new Date();
         prevDay.setDate(prevDay.getDate() - 1);
         const prevDayStr = prevDay.toISOString().split('T')[0];
@@ -895,7 +1146,7 @@ app.get('/api/cashout/summary', authenticate, async (req, res) => {
             [req.user.business_id, prevDayStr]
         );
         
-        const openingBalance = prevCashout.rows.length > 0 ? prevCashout.rows[0].actual_cash_balance : 0;
+        const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
         
         const summary = salesResult.rows[0];
         summary.total_expenses = parseFloat(expensesResult.rows[0].total_expenses || 0);
@@ -909,33 +1160,22 @@ app.get('/api/cashout/summary', authenticate, async (req, res) => {
     }
 });
 
-// Create or update cash-out (Z-Report)
 app.post('/api/cashout/close', authenticate, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
         const { 
-            actual_cash_balance, 
-            notes,
-            total_sales,
-            total_cash_sales,
-            total_credit_sales,
-            total_electronic_sales,
-            total_tax,
-            total_expenses,
-            cash_collected,
-            telebirr_collected,
-            cbe_birr_collected,
-            bank_transfer_collected,
-            opening_cash_balance
+            actual_cash_balance, notes, total_sales, total_cash_sales, 
+            total_credit_sales, total_electronic_sales, total_tax, 
+            total_expenses, cash_collected, telebirr_collected, 
+            cbe_birr_collected, bank_transfer_collected, opening_cash_balance 
         } = req.body;
         
         const today = new Date().toISOString().split('T')[0];
-        const expected_cash_balance = opening_cash_balance + total_cash_sales - total_expenses;
+        const expected_cash_balance = (opening_cash_balance || 0) + (total_cash_sales || 0) - (total_expenses || 0);
         const cash_difference = actual_cash_balance - expected_cash_balance;
         
-        // Check if cash-out already exists for today
         const existing = await client.query(
             'SELECT id FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2',
             [req.user.business_id, today]
@@ -943,38 +1183,25 @@ app.post('/api/cashout/close', authenticate, async (req, res) => {
         
         let result;
         if (existing.rows.length > 0) {
-            // Update existing
             result = await client.query(`
                 UPDATE daily_cashouts SET
-                    total_sales = $1,
-                    total_cash_sales = $2,
-                    total_credit_sales = $3,
-                    total_electronic_sales = $4,
-                    total_tax = $5,
-                    total_expenses = $6,
-                    cash_collected = $7,
-                    telebirr_collected = $8,
-                    cbe_birr_collected = $9,
-                    bank_transfer_collected = $10,
-                    opening_cash_balance = $11,
-                    expected_cash_balance = $12,
-                    actual_cash_balance = $13,
-                    cash_difference = $14,
-                    notes = $15,
-                    is_closed = true,
-                    closed_at = NOW(),
-                    updated_at = NOW()
+                    total_sales = $1, total_cash_sales = $2, total_credit_sales = $3,
+                    total_electronic_sales = $4, total_tax = $5, total_expenses = $6,
+                    cash_collected = $7, telebirr_collected = $8, cbe_birr_collected = $9,
+                    bank_transfer_collected = $10, opening_cash_balance = $11,
+                    expected_cash_balance = $12, actual_cash_balance = $13,
+                    cash_difference = $14, notes = $15, is_closed = true,
+                    closed_at = NOW(), updated_at = NOW()
                 WHERE business_id = $16 AND cashout_date = $17
                 RETURNING *
             `, [
                 total_sales, total_cash_sales, total_credit_sales, total_electronic_sales,
-                total_tax, total_expenses, cash_collected, telebirr_collected, cbe_birr_collected,
-                bank_transfer_collected, opening_cash_balance, expected_cash_balance,
-                actual_cash_balance, cash_difference, notes,
+                total_tax, total_expenses, cash_collected, telebirr_collected,
+                cbe_birr_collected, bank_transfer_collected, opening_cash_balance,
+                expected_cash_balance, actual_cash_balance, cash_difference, notes,
                 req.user.business_id, today
             ]);
         } else {
-            // Insert new
             result = await client.query(`
                 INSERT INTO daily_cashouts (
                     business_id, user_id, cashout_date, total_sales, total_cash_sales,
@@ -993,7 +1220,6 @@ app.post('/api/cashout/close', authenticate, async (req, res) => {
             ]);
         }
         
-        // Record action log
         await client.query(`
             INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
             VALUES ($1, $2, 'cashout', 'cashout', $3, $4)
@@ -1020,7 +1246,6 @@ app.post('/api/cashout/close', authenticate, async (req, res) => {
     }
 });
 
-// Get cash-out history
 app.get('/api/cashout/history', authenticate, async (req, res) => {
     try {
         const { limit = 30, offset = 0 } = req.query;
@@ -1038,42 +1263,6 @@ app.get('/api/cashout/history', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-// ============================================
-// TAX SETTINGS
-// ============================================
-app.get('/api/business/tax-settings', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT tin_number, tax_type, vat_percent, tot_percent, use_tax FROM businesses WHERE id = $1',
-            [req.user.business_id]
-        );
-        res.json({ settings: result.rows[0] || {} });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.put('/api/business/tax-settings', authenticate, async (req, res) => {
-    try {
-        const { tin_number, tax_type, vat_percent, tot_percent, use_tax } = req.body;
-        
-        await pool.query(
-            `UPDATE businesses SET 
-                tin_number = COALESCE($1, tin_number),
-                tax_type = COALESCE($2, tax_type),
-                vat_percent = COALESCE($3, vat_percent),
-                tot_percent = COALESCE($4, tot_percent),
-                use_tax = COALESCE($5, use_tax),
-                updated_at = NOW()
-             WHERE id = $6`,
-            [tin_number, tax_type, vat_percent, tot_percent, use_tax, req.user.business_id]
-        );
-        
-        res.json({ success: true, message: 'Tax settings updated' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
 
 // ============================================
 // START SERVER
@@ -1082,6 +1271,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 API URL: ${process.env.API_URL || 'https://smart-sme-api.onrender.com'}`);
+    console.log(`📅 Ethiopian Calendar Support: Enabled`);
+    console.log(`💰 Tax System: Optional (VAT/TOT/None)`);
 });
 
 module.exports = app;
