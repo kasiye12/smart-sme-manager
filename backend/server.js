@@ -135,8 +135,7 @@ app.post('/api/auth/register', async (req, res) => {
         }
         
         const bizResult = await pool.query(
-            'INSERT INTO businesses (name, owner_name, phone, tax_type, tax_rate, show_tax_on_receipt) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [business_name, owner_name, phone, 'none', 0, false]
+            'INSERT INTO businesses (name, owner_name, phone) VALUES ($1, $2, $3) RETURNING id', [business_name, owner_name, phone]
         );
         const businessId = bizResult.rows[0].id;
         
