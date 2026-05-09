@@ -1692,8 +1692,12 @@ Thank you for choosing us! 🙏
     }
 });
 
-// Send debt reminder via Telegram
+// ============================================
+// SEND TELEGRAM REMINDER - FIXED RESPONSE
+// ============================================
 app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
+    console.log('📨 Send reminder request received');
+    
     try {
         const { customerId, customerName, phone, amount, message, telegramChatId } = req.body;
         
@@ -1701,16 +1705,9 @@ app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Customer has not registered Telegram' });
         }
         
-        // FIX: Convert amount to number properly
-        const amountNum = parseFloat(amount) || 0;
+        const amountNum = typeof amount === 'number' ? amount : parseFloat(amount) || 0;
         
-        // Get customer details for current balance
-        const customer = await pool.query(
-            'SELECT full_name, current_balance FROM customers WHERE id = $1',
-            [customerId]
-        );
-        
-        const currentBalanceNum = parseFloat(customer.rows[0]?.current_balance) || amountNum;
+        console.log(`📤 Sending to: ${telegramChatId}, Amount: ${amountNum}`);
         
         const formattedMessage = `
 🔔 <b>PAYMENT REMINDER</b>
@@ -1721,38 +1718,98 @@ ${message}
 
 ━━━━━━━━━━━━━━━━━
 <b>💰 Amount Due:</b> <code>${amountNum.toFixed(2)} ETB</code>
-<b>💳 Current Balance:</b> <code>${currentBalanceNum.toFixed(2)} ETB</code>
-<b>📱 Phone:</b> <code>${phone}</code>
 ━━━━━━━━━━━━━━━━━
 
 Please make your payment as soon as possible.
 
 Thank you for your business! 🙏
 
-📅 ${new Date().toLocaleDateString()}
+📅 ${new Date().toLocaleString()}
         `;
         
-        const result = await sendTelegramMessage(telegramChatId, formattedMessage);
+        const TELEGRAM_API_URL = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
         
-        if (result && result.ok) {
+        // Use HTTP module instead of fetch for better compatibility
+        const https = require('https');
+        const url = require('url');
+        
+        const sendMessage = () => {
+            return new Promise((resolve, reject) => {
+                const parsedUrl = url.parse(`${TELEGRAM_API_URL}/sendMessage`);
+                const postData = JSON.stringify({
+                    chat_id: telegramChatId,
+                    text: formattedMessage,
+                    parse_mode: 'HTML'
+                });
+                
+                const options = {
+                    hostname: parsedUrl.hostname,
+                    path: parsedUrl.path,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(postData)
+                    }
+                };
+                
+                const request = https.request(options, (response) => {
+                    let data = '';
+                    response.on('data', (chunk) => { data += chunk; });
+                    response.on('end', () => {
+                        try {
+                            const result = JSON.parse(data);
+                            resolve(result);
+                        } catch (e) {
+                            resolve({ ok: false, description: 'Parse error' });
+                        }
+                    });
+                });
+                
+                request.on('error', (error) => {
+                    reject(error);
+                });
+                
+                request.write(postData);
+                request.end();
+            });
+        };
+        
+        const result = await sendMessage();
+        
+        console.log('Telegram API result:', result);
+        
+        if (result && result.ok === true) {
+            // Log success
             await pool.query(
                 `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
                  VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
                 [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
                     amount: amountNum, 
-                    status: 'sent',
-                    message_preview: message.substring(0, 50)
+                    status: 'sent'
                 })]
             );
             
-            res.json({ success: true, message: 'Telegram reminder sent successfully' });
+            // Send proper success response
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Telegram reminder sent successfully',
+                result: result
+            });
         } else {
-            throw new Error(result?.description || 'Failed to send');
+            const errorMsg = result?.description || 'Failed to send Telegram message';
+            console.log('❌ Telegram error:', errorMsg);
+            return res.status(200).json({ 
+                success: false, 
+                error: errorMsg 
+            });
         }
         
     } catch (error) {
-        console.error('Telegram reminder error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('❌ Server error:', error);
+        return res.status(200).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
