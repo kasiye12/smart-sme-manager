@@ -1632,27 +1632,118 @@ Please make your payment as soon as possible.
     }
 });
 
-// Webhook to handle user interactions
+// Add to server.js - Handle /start command with customer ID
 app.post('/api/telegram-webhook', async (req, res) => {
     try {
         const { message, callback_query } = req.body;
         
-        // Handle button clicks
-        if (callback_query) {
-            const chatId = callback_query.message.chat.id;
-            const data = callback_query.data;
-            const messageId = callback_query.message.message_id;
+        // Handle /start command with parameter
+        if (message && message.text) {
+            const chatId = message.chat.id;
+            const text = message.text;
             
-            // Answer callback query to remove loading state
-            await fetch(`${TELEGRAM_API_URL}/answerCallbackQuery`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ callback_query_id: callback_query.id })
-            });
-            
-            // Handle different button actions
-            if (data === 'balance') {
-                // Get customer balance from database
+            // Check if it's a /start command with customer ID
+            if (text.startsWith('/start')) {
+                const parts = text.split(' ');
+                let customerId = parts.length > 1 ? parts[1] : null;
+                
+                if (customerId) {
+                    // Find customer by ID from any business (you might want to restrict this)
+                    const customer = await pool.query(
+                        'SELECT id, full_name, business_id FROM customers WHERE id = $1',
+                        [customerId]
+                    );
+                    
+                    if (customer.rows.length > 0) {
+                        // Update customer with Telegram chat ID
+                        await pool.query(
+                            'UPDATE customers SET telegram_chat_id = $1 WHERE id = $2',
+                            [chatId.toString(), customerId]
+                        );
+                        
+                        // Send welcome message
+                        const welcomeMsg = `
+🎉 <b>Welcome to Smart SME Manager!</b>
+
+Dear ${customer.rows[0].full_name},
+
+Your Telegram account has been successfully linked!
+
+<b>What you can do:</b>
+• 💰 Receive payment reminders
+• 🧾 Get digital receipts
+• 📊 Check your balance
+
+<b>Current Balance:</b> Check with the shop
+
+Thank you for choosing us! 🙏
+
+<i>Type /help to see available commands</i>
+                        `;
+                        
+                        await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                chat_id: chatId,
+                                text: welcomeMsg,
+                                parse_mode: 'HTML'
+                            })
+                        });
+                        
+                        // Reply with success
+                        res.sendStatus(200);
+                        return;
+                    }
+                }
+                
+                // Generic welcome for unknown users
+                const welcomeMsg = `
+🤖 <b>Smart SME Manager Bot</b>
+
+Welcome! This bot helps you manage your credit and payments.
+
+<b>To get started:</b>
+1. Visit your shop
+2. Scan the QR code or click the link provided
+3. Your account will be automatically linked
+
+<i>Type /help for available commands</i>
+                        `;
+                        
+                await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: welcomeMsg,
+                        parse_mode: 'HTML'
+                    })
+                });
+            }
+            // Handle other commands...
+            else if (text === '/help') {
+                await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: `
+📖 <b>Available Commands</b>
+
+/start - Initialize bot
+/help - Show this help
+/balance - Check your balance
+/contact - Contact support
+
+<i>Simply click the link from your shop to connect!</i>
+                        `,
+                        parse_mode: 'HTML'
+                    })
+                });
+            }
+            else if (text === '/balance') {
+                // Check if user is registered
                 const customer = await pool.query(
                     'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
                     [chatId.toString()]
@@ -1660,102 +1751,34 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 
                 if (customer.rows.length > 0) {
                     const balance = customer.rows[0].current_balance;
-                    await sendTelegramMessage(chatId, 
-                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${balance} ETB</code>\n\nThank you! 🙏`
-                    );
+                    await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: chatId,
+                            text: `
+💰 <b>Account Balance</b>
+
+Dear ${customer.rows[0].full_name},
+
+Your current balance is: <code>${balance} ETB</code>
+
+Thank you for your business! 🙏
+                            `,
+                            parse_mode: 'HTML'
+                        })
+                    });
                 } else {
-                    await sendTelegramMessage(chatId, 
-                        `❌ <b>Account Not Found</b>\n\nPlease scan the QR code in the shop to link your account.`
-                    );
+                    await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            chat_id: chatId,
+                            text: `❌ <b>Account Not Found</b>\n\nPlease scan the QR code at your shop to link your account first.`,
+                            parse_mode: 'HTML'
+                        })
+                    });
                 }
-            } 
-            else if (data === 'payment') {
-                await sendTelegramMessage(chatId, 
-                    `💳 <b>Payment Options</b>\n\nPlease visit our shop to make a payment.\n\n📍 Location: Addis Ababa, Ethiopia\n📞 Phone: Contact shop for details\n\nThank you!`
-                );
-            }
-            else if (data === 'paid') {
-                await sendTelegramMessage(chatId, 
-                    `✅ <b>Payment Confirmation</b>\n\nThank you for informing us!\n\nWe will update your balance shortly.\n\nHave a great day! 🌟`
-                );
-            }
-            else if (data === 'contact') {
-                await sendTelegramMessage(chatId, 
-                    `📞 <b>Contact Us</b>\n\nPlease visit our shop or call us at:\n\n📱 0945-30-51-80\n\nWe're here to help! 🤝`
-                );
-            }
-            else if (data === 'support') {
-                await sendTelegramMessage(chatId, 
-                    `🆘 <b>Customer Support</b>\n\nHow can we help you?\n\nPlease describe your issue and we'll get back to you as soon as possible.\n\nThank you!`
-                );
-            }
-            
-            // Edit original message to show it was processed
-            await fetch(`${TELEGRAM_API_URL}/editMessageReplyMarkup`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    message_id: messageId,
-                    reply_markup: { inline_keyboard: [] }
-                })
-            });
-        }
-        
-        // Handle text messages
-        if (message && message.text && !callback_query) {
-            const chatId = message.chat.id;
-            const text = message.text.toLowerCase();
-            
-            if (text === '/start') {
-                await sendTelegramMessage(chatId, 
-                    '🤖 <b>Smart SME Manager Bot</b>\n\nWelcome! This bot will help you:\n\n' +
-                    '• 💰 Receive payment reminders\n' +
-                    '• 🧾 Get digital receipts\n' +
-                    '• 📊 Check your account balance\n' +
-                    '• 📅 View transaction history\n\n' +
-                    '<i>To link your account, please scan the QR code at the shop.</i>\n\n' +
-                    'Thank you for choosing us! 🙏'
-                );
-            } 
-            else if (text === '/help') {
-                await sendTelegramMessage(chatId, 
-                    '📖 <b>Help Center</b>\n\n<b>Available Commands:</b>\n' +
-                    '/start - Welcome message\n' +
-                    '/help - Show this help\n' +
-                    '/balance - Check your balance\n' +
-                    '/contact - Contact support\n\n' +
-                    '<b>Quick Actions:</b>\n' +
-                    '• Reply to any reminder to ask questions\n' +
-                    '• Click buttons on reminders to take action'
-                );
-            }
-            else if (text === '/balance') {
-                const customer = await pool.query(
-                    'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
-                    [chatId.toString()]
-                );
-                
-                if (customer.rows.length > 0) {
-                    await sendTelegramMessage(chatId, 
-                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${customer.rows[0].current_balance} ETB</code>\n\nThank you! 🙏`
-                    );
-                } else {
-                    await sendTelegramMessage(chatId, 
-                        `❌ <b>Account Not Found</b>\n\nPlease scan the QR code at the shop to link your account first.`
-                    );
-                }
-            }
-            else if (text === '/contact') {
-                await sendTelegramMessage(chatId, 
-                    `📞 <b>Contact Information</b>\n\n🏪 <b>Shop Name:</b> Smart SME\n📍 <b>Location:</b> Addis Ababa, Ethiopia\n📱 <b>Phone:</b> 0945-30-51-80\n\nWe're happy to help! 🤝`
-                );
-            }
-            else {
-                // Forward unknown messages to shop owner (optional)
-                await sendTelegramMessage(chatId, 
-                    `❓ <b>I didn't understand that.</b>\n\nType /help to see available commands or contact the shop directly.\n\nThank you!`
-                );
             }
         }
         
