@@ -1390,6 +1390,55 @@ app.post('/api/users/:id/reset-password', authenticate, authorize('owner'), asyn
         res.status(500).json({ error: error.message });
     }
 });
+// Add to server.js - SMS Endpoint
+
+// SMS Provider Configuration (Choose one)
+// Option A: Using Africa's Talking (Popular in Ethiopia)
+// Option B: Using Twilio
+// Option C: Using SMS Tech
+
+// For now, let's create a mock endpoint that logs messages
+
+app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
+    try {
+        const { customerId, customerName, phone, amount, message } = req.body;
+        
+        console.log('===== SMS REMINDER =====');
+        console.log(`To: ${phone} (${customerName})`);
+        console.log(`Amount: ${amount} ETB`);
+        console.log(`Message: ${message}`);
+        console.log('=======================');
+        
+        // Here you would integrate with actual SMS provider
+        // Example with Africa's Talking:
+        /*
+        const africastalking = require('africastalking');
+        const AT = africastalking({
+            apiKey: process.env.AFRICASTALKING_API_KEY,
+            username: process.env.AFRICASTALKING_USERNAME
+        });
+        
+        const sms = AT.SMS;
+        const result = await sms.send({
+            to: phone,
+            message: message,
+            from: 'SMART SME'
+        });
+        */
+        
+        // For now, return success for testing
+        res.json({ 
+            success: true, 
+            message: 'SMS sent successfully (Demo mode)',
+            log: { to: phone, customer: customerName, amount }
+        });
+        
+    } catch (error) {
+        console.error('SMS error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 
 // ============================================
 // START SERVER
