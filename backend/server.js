@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
@@ -400,22 +399,10 @@ app.delete('/api/products/:id', authenticate, authorize('owner', 'manager'), asy
     }
 });
 
-// // ============================================
-// // CUSTOMERS
-// // ============================================
-// app.get('/api/customers', authenticate, async (req, res) => {
-//     try {
-//         const result = await pool.query(
-//             'SELECT * FROM customers WHERE business_id = $1 AND is_active = true ORDER BY full_name',
-//             [req.user.business_id]
-//         );
-//         res.json({ customers: result.rows });
-//     } catch (error) { 
-//         res.status(500).json({ error: error.message }); 
-//     }
-// });
-
-a// POST /api/customers - Add Customer
+// ============================================
+// CUSTOMERS
+// ============================================
+// POST /api/customers - Add Customer
 app.post('/api/customers', authenticate, async (req, res) => {
   try {
     const { 
@@ -1438,15 +1425,8 @@ app.post('/api/users/:id/reset-password', authenticate, authorize('owner'), asyn
         res.status(500).json({ error: error.message });
     }
 });
-// Add to server.js - SMS Endpoint
 
-// SMS Provider Configuration (Choose one)
-// Option A: Using Africa's Talking (Popular in Ethiopia)
-// Option B: Using Twilio
-// Option C: Using SMS Tech
-
-// For now, let's create a mock endpoint that logs messages
-
+// SMS Endpoint
 app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
@@ -1457,24 +1437,6 @@ app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
         console.log(`Message: ${message}`);
         console.log('=======================');
         
-        // Here you would integrate with actual SMS provider
-        // Example with Africa's Talking:
-        /*
-        const africastalking = require('africastalking');
-        const AT = africastalking({
-            apiKey: process.env.AFRICASTALKING_API_KEY,
-            username: process.env.AFRICASTALKING_USERNAME
-        });
-        
-        const sms = AT.SMS;
-        const result = await sms.send({
-            to: phone,
-            message: message,
-            from: 'SMART SME'
-        });
-        */
-        
-        // For now, return success for testing
         res.json({ 
             success: true, 
             message: 'SMS sent successfully (Demo mode)',
@@ -1487,20 +1449,9 @@ app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
     }
 });
 
-// Add at the top with other requires
-
-
-
 // ============================================
-// COMPLETE TELEGRAM BOT IMPLEMENTATION
+// TELEGRAM BOT INTEGRATION
 // ============================================
-
-/// ============================================
-// TELEGRAM BOT INTEGRATION - COMPLETE
-// ============================================
-
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 // Helper: Send message to Telegram user
 async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
@@ -1523,10 +1474,10 @@ async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
     }
 }
 
-// Helper: Send message with inline keyboard buttons
-async function sendTelegramKeyboard(chatId, message, buttons) {
+// Helper: Send message with keyboard
+async function sendTelegramKeyboard(chatId, message, buttons, parseMode = 'HTML') {
     try {
-        const replyMarkup = {
+        const keyboard = {
             inline_keyboard: buttons
         };
         
@@ -1536,40 +1487,37 @@ async function sendTelegramKeyboard(chatId, message, buttons) {
             body: JSON.stringify({
                 chat_id: chatId,
                 text: message,
-                parse_mode: 'HTML',
-                reply_markup: replyMarkup
+                parse_mode: parseMode,
+                reply_markup: keyboard
             })
         });
-        return await response.json();
+        const result = await response.json();
+        return { success: result.ok, result };
     } catch (error) {
-        console.error('Telegram keyboard error:', error);
-        return null;
+        console.error('Telegram keyboard send error:', error);
+        return { success: false, error: error.message };
     }
 }
 
-// ============================================
-// TELEGRAM WEBHOOK - MAIN ENDPOINT
-// ============================================
+// Telegram Webhook Endpoint
 app.post('/api/telegram-webhook', async (req, res) => {
-    console.log('📨 Webhook received:', req.body?.message?.text || 'No message');
+    console.log('📨 Webhook received');
     
     try {
         const { message, callback_query } = req.body;
         
-        // Handle button clicks (callback queries)
+        // Handle button clicks
         if (callback_query) {
             const chatId = callback_query.message.chat.id;
             const data = callback_query.data;
-            const messageId = callback_query.message.message_id;
             
-            // Answer callback query to remove loading state
+            // Answer callback query
             await fetch(`${TELEGRAM_API_URL}/answerCallbackQuery`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ callback_query_id: callback_query.id })
             });
             
-            // Handle different button actions
             if (data === 'balance') {
                 const customer = await pool.query(
                     'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
@@ -1577,47 +1525,16 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 );
                 
                 if (customer.rows.length > 0) {
+                    const balance = parseFloat(customer.rows[0].current_balance) || 0;
                     await sendTelegramMessage(chatId, 
-                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${customer.rows[0].current_balance} ETB</code>\n\nThank you! 🙏`
+                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${balance.toFixed(2)} ETB</code>\n\nThank you! 🙏`
                     );
                 } else {
                     await sendTelegramMessage(chatId, 
                         `❌ <b>Account Not Found</b>\n\nPlease scan the QR code at the shop to link your account.`
                     );
                 }
-            } 
-            else if (data === 'payment') {
-                await sendTelegramMessage(chatId, 
-                    `💳 <b>Payment Options</b>\n\nPlease visit our shop to make a payment.\n\n📍 Location: Addis Ababa, Ethiopia\n📞 Phone: Contact shop for details\n\nThank you!`
-                );
             }
-            else if (data === 'paid') {
-                await sendTelegramMessage(chatId, 
-                    `✅ <b>Payment Confirmation</b>\n\nThank you for informing us!\n\nWe will update your balance shortly.\n\nHave a great day! 🌟`
-                );
-            }
-            else if (data === 'contact') {
-                await sendTelegramMessage(chatId, 
-                    `📞 <b>Contact Us</b>\n\nPlease visit our shop or call us at:\n\n📱 0945-30-51-80\n\nWe're here to help! 🤝`
-                );
-            }
-            else if (data === 'support') {
-                await sendTelegramMessage(chatId, 
-                    `🆘 <b>Customer Support</b>\n\nHow can we help you?\n\nPlease describe your issue and we'll get back to you as soon as possible.\n\nThank you!`
-                );
-            }
-            
-            // Remove buttons from original message
-            await fetch(`${TELEGRAM_API_URL}/editMessageReplyMarkup`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    message_id: messageId,
-                    reply_markup: { inline_keyboard: [] }
-                })
-            });
-            
             return res.sendStatus(200);
         }
         
@@ -1628,10 +1545,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
             
             console.log(`📱 Message from ${chatId}: ${text}`);
             
-            // Handle /start command with customer ID
+            // Handle /start command
             if (text.startsWith('/start')) {
                 const parts = text.split(' ');
-                const customerId = parts.length > 1 ? parts[1] : null;
+                let customerId = parts.length > 1 ? parts[1] : null;
                 
                 if (customerId) {
                     const customer = await pool.query(
@@ -1640,58 +1557,44 @@ app.post('/api/telegram-webhook', async (req, res) => {
                     );
                     
                     if (customer.rows.length > 0) {
-                        // Save customer's Telegram chat_id
                         await pool.query(
                             'UPDATE customers SET telegram_chat_id = $1 WHERE id = $2',
                             [chatId.toString(), customerId]
                         );
                         
-                        console.log(`✅ Customer ${customer.rows[0].full_name} connected with Telegram ID: ${chatId}`);
+                        const balance = parseFloat(customer.rows[0].current_balance) || 0;
                         
-                        // Send welcome message with buttons
+                        console.log(`✅ Customer ${customer.rows[0].full_name} connected with balance: ${balance}`);
+                        
                         const welcomeMsg = `
 🎉 <b>Welcome ${customer.rows[0].full_name}!</b>
 
 ✅ Your account is now connected to Telegram!
 
-<b>Current Balance:</b> <code>${customer.rows[0].current_balance} ETB</code>
+<b>Current Balance:</b> <code>${balance.toFixed(2)} ETB</code>
 
-<b>What you can do:</b>
-• 💰 Receive payment reminders
-• 📊 Check your balance anytime
-• 🧾 Get digital receipts
+<b>Commands:</b>
+/balance - Check your balance
+/help - Show help
 
-Type <code>/balance</code> to check your balance
-Type <code>/help</code> for more commands
+You will receive payment reminders here automatically.
 
 Thank you for choosing us! 🙏
                         `;
                         
-                        const buttons = [
-                            [
-                                { text: "💰 Check Balance", callback_data: "balance" },
-                                { text: "📞 Contact Support", callback_data: "support" }
-                            ]
-                        ];
-                        
-                        await sendTelegramKeyboard(chatId, welcomeMsg, buttons);
+                        await sendTelegramMessage(chatId, welcomeMsg);
                         res.sendStatus(200);
                         return;
                     }
                 }
                 
-                // Generic welcome for unknown users
+                // Generic welcome
                 await sendTelegramMessage(chatId, `
 🤖 <b>Smart SME Manager Bot</b>
 
-Welcome! This bot helps you manage your credit and payments.
+Welcome! To connect your account, please ask the shop for your personalized link.
 
-<b>To get started:</b>
-1. Visit your shop
-2. Ask for your Telegram connection link
-3. Click the link to connect your account
-
-Type <code>/help</code> for available commands
+Type /help for available commands.
                 `);
             }
             // Handle /balance command
@@ -1702,12 +1605,13 @@ Type <code>/help</code> for available commands
                 );
                 
                 if (customer.rows.length > 0) {
+                    const balance = parseFloat(customer.rows[0].current_balance) || 0;
                     await sendTelegramMessage(chatId, `
 💰 <b>Account Balance</b>
 
 Dear ${customer.rows[0].full_name},
 
-Your current balance is: <code>${customer.rows[0].current_balance} ETB</code>
+Your current balance is: <code>${balance.toFixed(2)} ETB</code>
 
 Thank you for your business! 🙏
                     `);
@@ -1739,10 +1643,6 @@ Please ask the shop to provide you with the Telegram connection link.
         res.sendStatus(200);
     }
 });
-
-// ============================================
-// TELEGRAM API ENDPOINTS
-// ============================================
 
 // Register customer Telegram ID manually
 app.post('/api/register-telegram', authenticate, async (req, res) => {
@@ -1841,7 +1741,7 @@ Thank you for your business! 🙏
         
         const result = await sendTelegramKeyboard(telegramChatId, formattedMessage, buttons);
         
-        if (result && result.ok) {
+        if (result && result.success) {
             await pool.query(
                 `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
                  VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
@@ -1854,7 +1754,7 @@ Thank you for your business! 🙏
             
             res.json({ success: true, message: 'Telegram reminder sent successfully' });
         } else {
-            throw new Error(result?.description || 'Failed to send');
+            throw new Error(result?.error || 'Failed to send');
         }
         
     } catch (error) {
@@ -1914,6 +1814,7 @@ app.post('/api/delete-telegram-webhook', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
 // ============================================
 // START SERVER
 // ============================================
