@@ -1038,6 +1038,42 @@ app.get('/api/cashout/history', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// ============================================
+// TAX SETTINGS
+// ============================================
+app.get('/api/business/tax-settings', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT tin_number, tax_type, vat_percent, tot_percent, use_tax FROM businesses WHERE id = $1',
+            [req.user.business_id]
+        );
+        res.json({ settings: result.rows[0] || {} });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.put('/api/business/tax-settings', authenticate, async (req, res) => {
+    try {
+        const { tin_number, tax_type, vat_percent, tot_percent, use_tax } = req.body;
+        
+        await pool.query(
+            `UPDATE businesses SET 
+                tin_number = COALESCE($1, tin_number),
+                tax_type = COALESCE($2, tax_type),
+                vat_percent = COALESCE($3, vat_percent),
+                tot_percent = COALESCE($4, tot_percent),
+                use_tax = COALESCE($5, use_tax),
+                updated_at = NOW()
+             WHERE id = $6`,
+            [tin_number, tax_type, vat_percent, tot_percent, use_tax, req.user.business_id]
+        );
+        
+        res.json({ success: true, message: 'Tax settings updated' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // ============================================
 // START SERVER
