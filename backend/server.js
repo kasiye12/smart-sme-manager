@@ -1264,6 +1264,134 @@ app.get('/api/cashout/history', authenticate, async (req, res) => {
 });
 
 // ============================================
+// USER MANAGEMENT ENDPOINTS
+// ============================================
+
+// Get all users for business
+app.get('/api/users', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, full_name, phone, role, is_active, pin_code, created_at FROM users WHERE business_id = $1 ORDER BY created_at',
+            [req.user.business_id]
+        );
+        res.json({ users: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add new user
+app.post('/api/users', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { full_name, phone, password, role, pin_code } = req.body;
+        
+        if (!full_name || !phone || !password || !role) {
+            return res.status(400).json({ error: 'All fields required' });
+        }
+        if (!['owner', 'manager', 'cashier'].includes(role)) {
+            return res.status(400).json({ error: 'Invalid role' });
+        }
+        
+        const existing = await pool.query('SELECT id FROM users WHERE phone = $1 AND business_id = $2', [phone, req.user.business_id]);
+        if (existing.rows.length > 0) {
+            return res.status(400).json({ error: 'Phone number already exists' });
+        }
+        
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        const result = await pool.query(
+            'INSERT INTO users (business_id, full_name, phone, password_hash, role, pin_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [req.user.business_id, full_name, phone, hashedPassword, role, pin_code || null]
+        );
+        
+        res.status(201).json({ success: true, user_id: result.rows[0].id });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update user
+app.put('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { full_name, phone, role, pin_code, is_active } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE users SET 
+                full_name = COALESCE($1, full_name),
+                phone = COALESCE($2, phone),
+                role = COALESCE($3, role),
+                pin_code = COALESCE($4, pin_code),
+                is_active = COALESCE($5, is_active),
+                updated_at = NOW()
+             WHERE id = $6 AND business_id = $7 RETURNING id`,
+            [full_name, phone, role, pin_code, is_active, id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        res.json({ success: true, message: 'User updated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete user (deactivate)
+app.delete('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        if (id === req.user.id) {
+            return res.status(400).json({ error: 'Cannot delete your own account' });
+        }
+        
+        const result = await pool.query(
+            'UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1 AND business_id = $2 RETURNING id',
+            [id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        res.json({ success: true, message: 'User deactivated' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Reset user password
+app.post('/api/users/:id/reset-password', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { password } = req.body;
+        
+        if (!password || password.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
+        
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        const result = await pool.query(
+            'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND business_id = $3 RETURNING id',
+            [hashedPassword, id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
