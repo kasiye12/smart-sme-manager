@@ -3,7 +3,11 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const fetch = require('node-fetch');
 
+// Telegram Bot Configuration - Use environment variable
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const app = express();
 
 // ============================================
@@ -1439,7 +1443,368 @@ app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
     }
 });
 
+// Add at the top with other requires
 
+
+
+// ============================================
+// COMPLETE TELEGRAM BOT IMPLEMENTATION
+// ============================================
+
+// Send message to Telegram user
+async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
+    try {
+        const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: message,
+                parse_mode: parseMode,
+                disable_web_page_preview: true
+            })
+        });
+        const result = await response.json();
+        return { success: result.ok, result };
+    } catch (error) {
+        console.error('Telegram send error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Send inline keyboard with buttons
+async function sendTelegramKeyboard(chatId, message, buttons) {
+    try {
+        const replyMarkup = {
+            inline_keyboard: buttons
+        };
+        
+        const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: message,
+                parse_mode: 'HTML',
+                reply_markup: replyMarkup
+            })
+        });
+        return await response.json();
+    } catch (error) {
+        console.error('Telegram keyboard error:', error);
+        return null;
+    }
+}
+
+// Register customer Telegram ID
+app.post('/api/register-telegram', authenticate, async (req, res) => {
+    try {
+        const { customerId, telegramChatId } = req.body;
+        
+        // Check if customer exists
+        const customer = await pool.query(
+            'SELECT * FROM customers WHERE id = $1 AND business_id = $2',
+            [customerId, req.user.business_id]
+        );
+        
+        if (customer.rows.length === 0) {
+            return res.status(404).json({ error: 'Customer not found' });
+        }
+        
+        // Update customer with Telegram chat ID
+        await pool.query(
+            'UPDATE customers SET telegram_chat_id = $1 WHERE id = $2',
+            [telegramChatId, customerId]
+        );
+        
+        // Send welcome message with buttons
+        const welcomeMessage = `
+🎉 <b>Welcome to Smart SME Manager!</b>
+
+Dear ${customer.rows[0].full_name},
+
+Your Telegram account has been successfully linked.
+
+<b>What you can do:</b>
+• 💰 Receive payment reminders
+• 🧾 Get digital receipts
+• 📊 Check your balance
+• 📅 View transaction history
+
+<b>Current Balance:</b> <code>${customer.rows[0].current_balance} ETB</code>
+
+Thank you for choosing us! 🙏
+        `;
+        
+        const buttons = [
+            [
+                { text: "💰 Check Balance", callback_data: "balance" },
+                { text: "📊 My Account", callback_data: "account" }
+            ],
+            [
+                { text: "🏪 Visit Shop", url: "https://t.me/SmartSMEReminderBot" },
+                { text: "📞 Contact Support", callback_data: "support" }
+            ]
+        ];
+        
+        await sendTelegramKeyboard(telegramChatId, welcomeMessage, buttons);
+        
+        res.json({ success: true, message: 'Telegram ID registered successfully' });
+        
+    } catch (error) {
+        console.error('Register telegram error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Send Debt Reminder via Telegram
+app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
+    try {
+        const { customerId, customerName, phone, amount, message, telegramChatId } = req.body;
+        
+        if (!telegramChatId) {
+            return res.status(400).json({ error: 'Customer has not registered Telegram' });
+        }
+        
+        // Get customer details
+        const customer = await pool.query(
+            'SELECT full_name, current_balance FROM customers WHERE id = $1',
+            [customerId]
+        );
+        
+        const currentBalance = customer.rows[0]?.current_balance || amount;
+        
+        // Format message with buttons
+        const formattedMessage = `
+🔔 <b>PAYMENT REMINDER</b>
+
+<strong>Dear ${customerName},</strong>
+
+${message}
+
+━━━━━━━━━━━━━━━━━
+<b>💰 Amount Due:</b> <code>${amount.toFixed(2)} ETB</code>
+<b>💳 Current Balance:</b> <code>${currentBalance.toFixed(2)} ETB</code>
+<b>📱 Phone:</b> <code>${phone}</code>
+━━━━━━━━━━━━━━━━━
+
+Please make your payment as soon as possible.
+
+<i>Thank you for your business! 🙏</i>
+
+📅 ${new Date().toLocaleDateString()}
+        `;
+        
+        // Create inline buttons
+        const buttons = [
+            [
+                { text: "💰 Make Payment", callback_data: "payment" },
+                { text: "📞 Contact Shop", callback_data: "contact" }
+            ],
+            [
+                { text: "✅ I've Paid", callback_data: "paid" },
+                { text: "❓ Ask Question", callback_data: "question" }
+            ]
+        ];
+        
+        const result = await sendTelegramKeyboard(telegramChatId, formattedMessage, buttons);
+        
+        if (result && result.ok) {
+            // Log the action
+            await pool.query(
+                `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
+                 VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
+                [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
+                    amount, 
+                    status: 'sent',
+                    message_preview: message.substring(0, 50)
+                })]
+            );
+            
+            res.json({ success: true, message: 'Telegram reminder sent successfully' });
+        } else {
+            throw new Error(result?.description || 'Failed to send');
+        }
+        
+    } catch (error) {
+        console.error('Telegram reminder error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Webhook to handle user interactions
+app.post('/api/telegram-webhook', async (req, res) => {
+    try {
+        const { message, callback_query } = req.body;
+        
+        // Handle button clicks
+        if (callback_query) {
+            const chatId = callback_query.message.chat.id;
+            const data = callback_query.data;
+            const messageId = callback_query.message.message_id;
+            
+            // Answer callback query to remove loading state
+            await fetch(`${TELEGRAM_API_URL}/answerCallbackQuery`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ callback_query_id: callback_query.id })
+            });
+            
+            // Handle different button actions
+            if (data === 'balance') {
+                // Get customer balance from database
+                const customer = await pool.query(
+                    'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
+                    [chatId.toString()]
+                );
+                
+                if (customer.rows.length > 0) {
+                    const balance = customer.rows[0].current_balance;
+                    await sendTelegramMessage(chatId, 
+                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${balance} ETB</code>\n\nThank you! 🙏`
+                    );
+                } else {
+                    await sendTelegramMessage(chatId, 
+                        `❌ <b>Account Not Found</b>\n\nPlease scan the QR code in the shop to link your account.`
+                    );
+                }
+            } 
+            else if (data === 'payment') {
+                await sendTelegramMessage(chatId, 
+                    `💳 <b>Payment Options</b>\n\nPlease visit our shop to make a payment.\n\n📍 Location: Addis Ababa, Ethiopia\n📞 Phone: Contact shop for details\n\nThank you!`
+                );
+            }
+            else if (data === 'paid') {
+                await sendTelegramMessage(chatId, 
+                    `✅ <b>Payment Confirmation</b>\n\nThank you for informing us!\n\nWe will update your balance shortly.\n\nHave a great day! 🌟`
+                );
+            }
+            else if (data === 'contact') {
+                await sendTelegramMessage(chatId, 
+                    `📞 <b>Contact Us</b>\n\nPlease visit our shop or call us at:\n\n📱 0945-30-51-80\n\nWe're here to help! 🤝`
+                );
+            }
+            else if (data === 'support') {
+                await sendTelegramMessage(chatId, 
+                    `🆘 <b>Customer Support</b>\n\nHow can we help you?\n\nPlease describe your issue and we'll get back to you as soon as possible.\n\nThank you!`
+                );
+            }
+            
+            // Edit original message to show it was processed
+            await fetch(`${TELEGRAM_API_URL}/editMessageReplyMarkup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    message_id: messageId,
+                    reply_markup: { inline_keyboard: [] }
+                })
+            });
+        }
+        
+        // Handle text messages
+        if (message && message.text && !callback_query) {
+            const chatId = message.chat.id;
+            const text = message.text.toLowerCase();
+            
+            if (text === '/start') {
+                await sendTelegramMessage(chatId, 
+                    '🤖 <b>Smart SME Manager Bot</b>\n\nWelcome! This bot will help you:\n\n' +
+                    '• 💰 Receive payment reminders\n' +
+                    '• 🧾 Get digital receipts\n' +
+                    '• 📊 Check your account balance\n' +
+                    '• 📅 View transaction history\n\n' +
+                    '<i>To link your account, please scan the QR code at the shop.</i>\n\n' +
+                    'Thank you for choosing us! 🙏'
+                );
+            } 
+            else if (text === '/help') {
+                await sendTelegramMessage(chatId, 
+                    '📖 <b>Help Center</b>\n\n<b>Available Commands:</b>\n' +
+                    '/start - Welcome message\n' +
+                    '/help - Show this help\n' +
+                    '/balance - Check your balance\n' +
+                    '/contact - Contact support\n\n' +
+                    '<b>Quick Actions:</b>\n' +
+                    '• Reply to any reminder to ask questions\n' +
+                    '• Click buttons on reminders to take action'
+                );
+            }
+            else if (text === '/balance') {
+                const customer = await pool.query(
+                    'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
+                    [chatId.toString()]
+                );
+                
+                if (customer.rows.length > 0) {
+                    await sendTelegramMessage(chatId, 
+                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${customer.rows[0].current_balance} ETB</code>\n\nThank you! 🙏`
+                    );
+                } else {
+                    await sendTelegramMessage(chatId, 
+                        `❌ <b>Account Not Found</b>\n\nPlease scan the QR code at the shop to link your account first.`
+                    );
+                }
+            }
+            else if (text === '/contact') {
+                await sendTelegramMessage(chatId, 
+                    `📞 <b>Contact Information</b>\n\n🏪 <b>Shop Name:</b> Smart SME\n📍 <b>Location:</b> Addis Ababa, Ethiopia\n📱 <b>Phone:</b> 0945-30-51-80\n\nWe're happy to help! 🤝`
+                );
+            }
+            else {
+                // Forward unknown messages to shop owner (optional)
+                await sendTelegramMessage(chatId, 
+                    `❓ <b>I didn't understand that.</b>\n\nType /help to see available commands or contact the shop directly.\n\nThank you!`
+                );
+            }
+        }
+        
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('Webhook error:', error);
+        res.sendStatus(200);
+    }
+});
+
+// Test Telegram Bot
+app.get('/api/test-telegram', authenticate, async (req, res) => {
+    try {
+        // Get bot info
+        const botInfo = await fetch(`${TELEGRAM_API_URL}/getMe`);
+        const botData = await botInfo.json();
+        
+        // Get webhook info
+        const webhookInfo = await fetch(`${TELEGRAM_API_URL}/getWebhookInfo`);
+        const webhookData = await webhookInfo.json();
+        
+        res.json({ 
+            success: true, 
+            bot: botData.result,
+            webhook: webhookData.result,
+            message: 'Telegram bot is configured correctly'
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Set webhook endpoint (run this once via API call)
+app.post('/api/set-telegram-webhook', authenticate, async (req, res) => {
+    try {
+        const webhookUrl = `${process.env.API_URL}/api/telegram-webhook`;
+        
+        const response = await fetch(`${TELEGRAM_API_URL}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: webhookUrl })
+        });
+        
+        const result = await response.json();
+        res.json({ success: result.ok, result });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================
 // START SERVER
 // ============================================
