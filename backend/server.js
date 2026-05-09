@@ -1701,23 +1701,27 @@ app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Customer has not registered Telegram' });
         }
         
+        // FIX: Convert amount to number properly
+        const amountNum = parseFloat(amount) || 0;
+        
+        // Get customer details for current balance
         const customer = await pool.query(
             'SELECT full_name, current_balance FROM customers WHERE id = $1',
             [customerId]
         );
         
-        const currentBalance = customer.rows[0]?.current_balance || amount;
+        const currentBalanceNum = parseFloat(customer.rows[0]?.current_balance) || amountNum;
         
         const formattedMessage = `
 🔔 <b>PAYMENT REMINDER</b>
 
-<strong>Dear ${customerName},</strong>
+Dear ${customerName},
 
 ${message}
 
 ━━━━━━━━━━━━━━━━━
-<b>💰 Amount Due:</b> <code>${amount.toFixed(2)} ETB</code>
-<b>💳 Current Balance:</b> <code>${currentBalance.toFixed(2)} ETB</code>
+<b>💰 Amount Due:</b> <code>${amountNum.toFixed(2)} ETB</code>
+<b>💳 Current Balance:</b> <code>${currentBalanceNum.toFixed(2)} ETB</code>
 <b>📱 Phone:</b> <code>${phone}</code>
 ━━━━━━━━━━━━━━━━━
 
@@ -1728,25 +1732,14 @@ Thank you for your business! 🙏
 📅 ${new Date().toLocaleDateString()}
         `;
         
-        const buttons = [
-            [
-                { text: "💰 Check Balance", callback_data: "balance" },
-                { text: "📞 Contact Shop", callback_data: "contact" }
-            ],
-            [
-                { text: "✅ I've Paid", callback_data: "paid" },
-                { text: "❓ Ask Question", callback_data: "support" }
-            ]
-        ];
+        const result = await sendTelegramMessage(telegramChatId, formattedMessage);
         
-        const result = await sendTelegramKeyboard(telegramChatId, formattedMessage, buttons);
-        
-        if (result && result.success) {
+        if (result && result.ok) {
             await pool.query(
                 `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
                  VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
                 [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
-                    amount, 
+                    amount: amountNum, 
                     status: 'sent',
                     message_preview: message.substring(0, 50)
                 })]
@@ -1754,7 +1747,7 @@ Thank you for your business! 🙏
             
             res.json({ success: true, message: 'Telegram reminder sent successfully' });
         } else {
-            throw new Error(result?.error || 'Failed to send');
+            throw new Error(result?.description || 'Failed to send');
         }
         
     } catch (error) {
