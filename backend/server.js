@@ -2423,8 +2423,6 @@ app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'man
 // META WHATSAPP CLOUD API (FREE)
 // ============================================
 
-
-
 // Send WhatsApp message via Meta Cloud API
 async function sendWhatsAppMessage(to, message) {
     try {
@@ -2840,6 +2838,378 @@ app.get('/api/sales-targets/history', authenticate, async (req, res) => {
         res.json({ success: true, data: result.rows });
     } catch (error) {
         console.error('Get history error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// Add these endpoints to your server.js
+
+// ============================================
+// ADVANCED DAILY REPORT WITH GROWTH & Z-REPORT
+// ============================================
+app.get('/api/reports/advanced/daily', authenticate, async (req, res) => {
+    try {
+        const date = req.query.date || new Date().toISOString().split('T')[0];
+        const yesterday = new Date(new Date(date) - 86400000).toISOString().split('T')[0];
+        
+        // Main query for current day
+        const currentDayQuery = await pool.query(`
+            WITH sales_data AS (
+                SELECT 
+                    COALESCE(SUM(s.total_amount), 0) as total_revenue,
+                    COUNT(*) as total_sales,
+                    COUNT(DISTINCT s.customer_id) as unique_customers,
+                    COALESCE(SUM(CASE WHEN s.payment_method = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
+                    COALESCE(SUM(CASE WHEN s.payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN s.total_amount ELSE 0 END), 0) as digital_sales,
+                    COALESCE(SUM(CASE WHEN s.payment_status = 'credit' THEN s.total_amount ELSE 0 END), 0) as credit_sales,
+                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
+                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit,
+                    COALESCE(SUM(s.tax_amount), 0) as total_tax
+                FROM sales s
+                LEFT JOIN sale_items si ON s.id = si.sale_id
+                LEFT JOIN products p ON si.product_id = p.id
+                WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+                GROUP BY s.sale_date
+            ),
+            expenses_data AS (
+                SELECT COALESCE(SUM(amount), 0) as total_expenses
+                FROM expenses
+                WHERE business_id = $1 AND expense_date = $2
+            ),
+            previous_day AS (
+                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
+                       COUNT(*) as prev_sales
+                FROM sales
+                WHERE business_id = $1 AND sale_date = $3 AND status = 'completed'
+            ),
+            cashout_data AS (
+                SELECT opening_cash_balance, actual_cash_balance
+                FROM daily_cashouts
+                WHERE business_id = $1 AND cashout_date = $2
+                LIMIT 1
+            )
+            SELECT 
+                sd.*,
+                ed.total_expenses,
+                pd.prev_revenue,
+                pd.prev_sales,
+                sd.gross_profit - ed.total_expenses as net_profit,
+                cd.opening_cash_balance,
+                cd.actual_cash_balance,
+                -- Growth calculations
+                CASE WHEN pd.prev_revenue > 0 THEN ((sd.total_revenue - pd.prev_revenue) / pd.prev_revenue) * 100 ELSE 0 END as revenue_growth,
+                CASE WHEN pd.prev_sales > 0 THEN ((sd.total_sales - pd.prev_sales) / pd.prev_sales) * 100 ELSE 0 END as sales_growth,
+                -- Z-Report expected cash
+                COALESCE(cd.opening_cash_balance, 0) + sd.cash_sales as expected_cash_balance,
+                -- Margins
+                CASE WHEN sd.total_revenue > 0 THEN (sd.gross_profit / sd.total_revenue) * 100 ELSE 0 END as gross_margin,
+                CASE WHEN sd.total_revenue > 0 THEN ((sd.gross_profit - ed.total_expenses) / sd.total_revenue) * 100 ELSE 0 END as net_margin
+            FROM sales_data sd
+            CROSS JOIN expenses_data ed
+            CROSS JOIN previous_day pd
+            LEFT JOIN cashout_data cd ON true
+        `, [req.user.business_id, date, yesterday]);
+        
+        // Get top products for the day
+        const topProducts = await pool.query(`
+            SELECT 
+                p.name_translations->>'en' as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue,
+                (SUM(si.total_price) / (SELECT COALESCE(SUM(total_amount), 1) FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = 'completed')) * 100 as percentage
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 5
+        `, [req.user.business_id, date]);
+        
+        const result = currentDayQuery.rows[0] || {};
+        
+        res.json({
+            success: true,
+            period: { date: date },
+            summary: {
+                total_revenue: parseFloat(result.total_revenue || 0),
+                total_sales: parseInt(result.total_sales || 0),
+                unique_customers: parseInt(result.unique_customers || 0),
+                average_transaction: result.total_sales > 0 ? (result.total_revenue / result.total_sales) : 0,
+                total_tax: parseFloat(result.total_tax || 0)
+            },
+            profit: {
+                cogs: parseFloat(result.cogs || 0),
+                gross_profit: parseFloat(result.gross_profit || 0),
+                gross_margin: parseFloat(result.gross_margin || 0),
+                total_expenses: parseFloat(result.total_expenses || 0),
+                net_profit: parseFloat(result.net_profit || 0),
+                net_margin: parseFloat(result.net_margin || 0)
+            },
+            growth: {
+                revenue_growth: parseFloat(result.revenue_growth || 0),
+                sales_growth: parseFloat(result.sales_growth || 0),
+                previous_revenue: parseFloat(result.prev_revenue || 0),
+                previous_sales: parseInt(result.prev_sales || 0),
+                trend: result.revenue_growth > 0 ? 'up' : (result.revenue_growth < 0 ? 'down' : 'same')
+            },
+            payment_breakdown: {
+                cash: parseFloat(result.cash_sales || 0),
+                digital: parseFloat(result.digital_sales || 0),
+                credit: parseFloat(result.credit_sales || 0)
+            },
+            z_report: {
+                opening_cash: parseFloat(result.opening_cash_balance || 0),
+                cash_sales: parseFloat(result.cash_sales || 0),
+                expected_cash: parseFloat(result.expected_cash_balance || 0),
+                actual_cash: parseFloat(result.actual_cash_balance || null),
+                status: result.actual_cash_balance ? (result.actual_cash_balance >= result.expected_cash_balance ? 'balanced' : 'short') : 'pending'
+            },
+            top_products: topProducts.rows
+        });
+        
+    } catch (error) {
+        console.error('Daily report error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// ADVANCED MONTHLY REPORT WITH COMPARISON
+// ============================================
+app.get('/api/reports/advanced/monthly', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+        const targetMonth = month || new Date().getMonth() + 1;
+        const targetYear = year || new Date().getFullYear();
+        
+        // Calculate previous month
+        let prevMonth = targetMonth - 1;
+        let prevYear = targetYear;
+        if (prevMonth === 0) {
+            prevMonth = 12;
+            prevYear = targetYear - 1;
+        }
+        
+        const result = await pool.query(`
+            WITH current_month AS (
+                SELECT 
+                    COALESCE(SUM(s.total_amount), 0) as revenue,
+                    COUNT(*) as sales_count,
+                    COUNT(DISTINCT s.customer_id) as customers,
+                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
+                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit
+                FROM sales s
+                LEFT JOIN sale_items si ON s.id = si.sale_id
+                LEFT JOIN products p ON si.product_id = p.id
+                WHERE s.business_id = $1 
+                    AND EXTRACT(MONTH FROM s.sale_date) = $2 
+                    AND EXTRACT(YEAR FROM s.sale_date) = $3
+                    AND s.status = 'completed'
+            ),
+            current_expenses AS (
+                SELECT COALESCE(SUM(amount), 0) as expenses
+                FROM expenses
+                WHERE business_id = $1 
+                    AND EXTRACT(MONTH FROM expense_date) = $2 
+                    AND EXTRACT(YEAR FROM expense_date) = $3
+            ),
+            previous_month AS (
+                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
+                       COUNT(*) as prev_sales
+                FROM sales
+                WHERE business_id = $1 
+                    AND EXTRACT(MONTH FROM sale_date) = $4 
+                    AND EXTRACT(YEAR FROM sale_date) = $5
+                    AND status = 'completed'
+            )
+            SELECT 
+                cm.*,
+                ce.expenses,
+                pm.prev_revenue,
+                pm.prev_sales,
+                cm.gross_profit - ce.expenses as net_profit,
+                -- Growth
+                CASE WHEN pm.prev_revenue > 0 THEN ((cm.revenue - pm.prev_revenue) / pm.prev_revenue) * 100 ELSE 0 END as revenue_growth,
+                CASE WHEN pm.prev_sales > 0 THEN ((cm.sales_count - pm.prev_sales) / pm.prev_sales) * 100 ELSE 0 END as sales_growth,
+                -- Margins
+                CASE WHEN cm.revenue > 0 THEN (cm.gross_profit / cm.revenue) * 100 ELSE 0 END as gross_margin,
+                CASE WHEN cm.revenue > 0 THEN ((cm.gross_profit - ce.expenses) / cm.revenue) * 100 ELSE 0 END as net_margin
+            FROM current_month cm
+            CROSS JOIN current_expenses ce
+            CROSS JOIN previous_month pm
+        `, [req.user.business_id, targetMonth, targetYear, prevMonth, prevYear]);
+        
+        // Get monthly top products
+        const topProducts = await pool.query(`
+            SELECT 
+                p.name_translations->>'en' as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 
+                AND EXTRACT(MONTH FROM s.sale_date) = $2 
+                AND EXTRACT(YEAR FROM s.sale_date) = $3
+                AND s.status = 'completed'
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 5
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        const row = result.rows[0] || {};
+        
+        res.json({
+            success: true,
+            period: { month: targetMonth, year: targetYear },
+            summary: {
+                total_revenue: parseFloat(row.revenue || 0),
+                total_sales: parseInt(row.sales_count || 0),
+                unique_customers: parseInt(row.customers || 0),
+                average_transaction: row.sales_count > 0 ? (row.revenue / row.sales_count) : 0
+            },
+            profit: {
+                cogs: parseFloat(row.cogs || 0),
+                gross_profit: parseFloat(row.gross_profit || 0),
+                gross_margin: parseFloat(row.gross_margin || 0),
+                total_expenses: parseFloat(row.expenses || 0),
+                net_profit: parseFloat(row.net_profit || 0),
+                net_margin: parseFloat(row.net_margin || 0)
+            },
+            growth: {
+                revenue_growth: parseFloat(row.revenue_growth || 0),
+                sales_growth: parseFloat(row.sales_growth || 0),
+                previous_revenue: parseFloat(row.prev_revenue || 0),
+                previous_sales: parseInt(row.prev_sales || 0),
+                trend: row.revenue_growth > 0 ? 'up' : (row.revenue_growth < 0 ? 'down' : 'same')
+            },
+            top_products: topProducts.rows
+        });
+        
+    } catch (error) {
+        console.error('Monthly report error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// Z-REPORT CLOSING ENDPOINT
+// ============================================
+app.post('/api/z-report/close', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { actual_cash_balance, notes } = req.body;
+        const today = new Date().toISOString().split('T')[0];
+        
+        // Get previous day's closing balance
+        const prevDay = new Date();
+        prevDay.setDate(prevDay.getDate() - 1);
+        const prevDayStr = prevDay.toISOString().split('T')[0];
+        
+        const prevCashout = await client.query(
+            'SELECT actual_cash_balance FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2 AND is_closed = true',
+            [req.user.business_id, prevDayStr]
+        );
+        
+        const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
+        
+        // Get today's cash sales
+        const cashSales = await client.query(
+            'SELECT COALESCE(SUM(total_amount), 0) as cash_total FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_method = \'cash\' AND status = \'completed\'',
+            [req.user.business_id, today]
+        );
+        
+        // Get today's cash expenses
+        const cashExpenses = await client.query(
+            'SELECT COALESCE(SUM(amount), 0) as expense_total FROM expenses WHERE business_id = $1 AND expense_date = $2 AND payment_method = \'cash\'',
+            [req.user.business_id, today]
+        );
+        
+        const expectedCash = openingBalance + parseFloat(cashSales.rows[0].cash_total) - parseFloat(cashExpenses.rows[0].expense_total);
+        const difference = actual_cash_balance - expectedCash;
+        const status = difference === 0 ? 'exact' : (difference > 0 ? 'over' : 'short');
+        
+        // Save Z-Report
+        const result = await client.query(
+            `INSERT INTO daily_cashouts (
+                business_id, user_id, cashout_date, opening_cash_balance, 
+                cash_sales, cash_expenses, expected_cash_balance, 
+                actual_cash_balance, cash_difference, status, notes, is_closed, closed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, NOW())
+            ON CONFLICT (business_id, cashout_date) 
+            DO UPDATE SET 
+                actual_cash_balance = $8,
+                cash_difference = $9,
+                status = $10,
+                notes = $11,
+                is_closed = true,
+                closed_at = NOW()
+            RETURNING *`,
+            [req.user.business_id, req.user.id, today, openingBalance, 
+             cashSales.rows[0].cash_total, cashExpenses.rows[0].expense_total,
+             expectedCash, actual_cash_balance, Math.abs(difference), status, notes]
+        );
+        
+        await client.query('COMMIT');
+        
+        // Generate Z-Report summary
+        const summary = {
+            date: today,
+            opening_balance: openingBalance,
+            cash_sales: parseFloat(cashSales.rows[0].cash_total),
+            cash_expenses: parseFloat(cashExpenses.rows[0].expense_total),
+            expected_cash: expectedCash,
+            actual_cash: actual_cash_balance,
+            difference: difference,
+            status: status
+        };
+        
+        res.json({ 
+            success: true, 
+            cashout: result.rows[0],
+            summary: summary,
+            message: status === 'short' 
+                ? `⚠️ Cash Shortage: ${Math.abs(difference)} ETB. Please check your records.` 
+                : status === 'over' 
+                    ? `✅ Cash Over: ${difference} ETB extra. Verify for errors.` 
+                    : '✅ Cash balanced perfectly! Z-Report closed.'
+        });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Z-Report error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// ============================================
+// GET Z-REPORT STATUS
+// ============================================
+app.get('/api/z-report/status', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        
+        const result = await pool.query(
+            `SELECT * FROM daily_cashouts 
+             WHERE business_id = $1 AND cashout_date = $2`,
+            [req.user.business_id, today]
+        );
+        
+        const isClosed = result.rows.length > 0 && result.rows[0].is_closed === true;
+        
+        res.json({ 
+            is_closed: isClosed,
+            cashout: result.rows[0] || null,
+            message: isClosed ? 'Z-Report already closed for today' : 'Z-Report pending. Ready to close.'
+        });
+        
+    } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
