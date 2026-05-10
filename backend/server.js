@@ -2420,20 +2420,13 @@ app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
         
-        // Format phone number for WhatsApp
-        let formattedPhone = phone.replace(/\D/g, '');
-        if (formattedPhone.startsWith('0')) {
-            formattedPhone = '251' + formattedPhone.substring(1);
-        }
-        
-        // For now, log the message
-        console.log(`📱 WhatsApp Reminder to ${formattedPhone}: ${message}`);
+        console.log(`📱 WhatsApp Reminder to ${phone}: ${message.substring(0, 50)}...`);
         
         // Log to database
         await pool.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'send_whatsapp', 'customer', $3, $4)`,
-            [req.user.business_id, req.user.id, customerId, JSON.stringify({ phone: formattedPhone, amount, message_preview: message.substring(0, 50) })]
+            [req.user.business_id, req.user.id, customerId, JSON.stringify({ phone, amount, message_preview: message.substring(0, 50) })]
         );
         
         res.json({ success: true, message: 'WhatsApp message logged' });
