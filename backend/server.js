@@ -2640,6 +2640,82 @@ app.get('/api/test-whatsapp-config', authenticate, async (req, res) => {
         accessToken: META_ACCESS_TOKEN ? 'Set' : 'Not set'
     });
 });
+
+// ============================================
+// SALES TARGET ENDPOINTS
+// ============================================
+
+// Get sales targets
+app.get('/api/sales-targets', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const thisMonth = new Date().getMonth() + 1;
+        const thisYear = new Date().getFullYear();
+        
+        // Get or create today's target
+        let todayTarget = await pool.query(
+            'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_date = $2',
+            [req.user.business_id, today]
+        );
+        
+        let targetAmount = todayTarget.rows[0]?.target_amount || 0;
+        
+        // Get today's sales
+        const todaySales = await pool.query(
+            'SELECT COALESCE(SUM(total_amount), 0) as total FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = \'completed\'',
+            [req.user.business_id, today]
+        );
+        
+        // Get monthly target
+        let monthTarget = await pool.query(
+            'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_month = $2 AND target_year = $3',
+            [req.user.business_id, thisMonth, thisYear]
+        );
+        
+        let monthTargetAmount = monthTarget.rows[0]?.target_amount || 0;
+        
+        // Get month-to-date sales
+        const monthSales = await pool.query(
+            `SELECT COALESCE(SUM(total_amount), 0) as total 
+             FROM sales 
+             WHERE business_id = $1 
+             AND EXTRACT(MONTH FROM sale_date) = $2 
+             AND EXTRACT(YEAR FROM sale_date) = $3 
+             AND status = 'completed'`,
+            [req.user.business_id, thisMonth, thisYear]
+        );
+        
+        res.json({
+            success: true,
+            today_target: parseFloat(targetAmount),
+            today_sales: parseFloat(todaySales.rows[0].total),
+            month_target: parseFloat(monthTargetAmount),
+            month_sales: parseFloat(monthSales.rows[0].total)
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Set today's target
+app.post('/api/sales-targets/today', authenticate, async (req, res) => {
+    try {
+        const { target } = req.body;
+        const today = new Date().toISOString().split('T')[0];
+        
+        await pool.query(
+            `INSERT INTO sales_targets (business_id, target_date, target_amount, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (business_id, target_date) 
+             DO UPDATE SET target_amount = $3, updated_at = NOW()`,
+            [req.user.business_id, today, target]
+        );
+        
+        res.json({ success: true, message: 'Target set successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================
 // START SERVER
 // ============================================
