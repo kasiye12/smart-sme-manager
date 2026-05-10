@@ -737,8 +737,8 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
     } finally { client.release(); }
 });
 
-/// ============================================
-// FIXED DAILY REPORT ENDPOINT
+// ============================================
+// COMPLETE DAILY REPORT WITH PAYMENT BREAKDOWN
 // ============================================
 app.get('/api/reports/daily', authenticate, async (req, res) => {
     try {
@@ -746,7 +746,7 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
         
         console.log(`Generating daily report for: ${today}, business: ${req.user.business_id}`);
         
-        // Get sales summary with correct calculations
+        // Get sales summary
         const salesResult = await pool.query(`
             SELECT 
                 COUNT(*) as total_sales,
@@ -761,7 +761,7 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Calculate GROSS PROFIT from products (Revenue - COGS)
+        // Calculate GROSS PROFIT
         const profitResult = await pool.query(`
             SELECT COALESCE(SUM(
                 (si.unit_price - COALESCE(p.cost_price, 0)) * si.quantity
@@ -774,27 +774,41 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Get expenses for the day
+        // Get expenses
         const expenseResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses 
             WHERE business_id = $1 AND expense_date = $2
         `, [req.user.business_id, today]);
         
-        // Get payment method breakdown
+        // Get payment method breakdown - FIXED
         const paymentResult = await pool.query(`
             SELECT 
-                COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total_amount ELSE 0 END), 0) as cash_sales,
-                COALESCE(SUM(CASE WHEN payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN total_amount ELSE 0 END), 0) as electronic_sales,
-                COALESCE(SUM(CASE WHEN payment_status = 'credit' THEN total_amount ELSE 0 END), 0) as credit_sales
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_method) = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_method) IN ('telebirr', 'cbe_birr', 'cbe', 'bank_transfer', 'digital') THEN s.total_amount ELSE 0 END), 0) as electronic_sales,
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_status) = 'credit' THEN s.total_amount ELSE 0 END), 0) as credit_sales,
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_method) NOT IN ('cash', 'telebirr', 'cbe_birr', 'cbe', 'bank_transfer', 'digital') 
+                    AND LOWER(s.payment_status) != 'credit' THEN s.total_amount ELSE 0 END), 0) as other_sales
+            FROM sales s
+            WHERE s.business_id = $1 
+            AND s.sale_date = $2 
+            AND s.status = 'completed'
+        `, [req.user.business_id, today]);
+        
+        // Get previous day for growth calculation
+        const yesterday = new Date(new Date(today) - 86400000).toISOString().split('T')[0];
+        const prevDayResult = await pool.query(`
+            SELECT COALESCE(SUM(total_amount), 0) as prev_revenue
             FROM sales
             WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
-        `, [req.user.business_id, today]);
+        `, [req.user.business_id, yesterday]);
         
         const sales = salesResult.rows[0];
         const grossProfit = parseFloat(profitResult.rows[0].gross_profit) || 0;
         const totalExpenses = parseFloat(expenseResult.rows[0].total_expenses) || 0;
         const netProfit = grossProfit - totalExpenses;
+        const prevRevenue = parseFloat(prevDayResult.rows[0].prev_revenue) || 0;
+        const revenueGrowth = prevRevenue > 0 ? ((parseFloat(sales.total_revenue) - prevRevenue) / prevRevenue) * 100 : 0;
         
         const response = {
             date: today,
@@ -807,9 +821,12 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             gross_profit: grossProfit,
             total_expenses: totalExpenses,
             net_profit: netProfit,
+            revenue_growth: revenueGrowth,
+            // Payment breakdown - ensure these are included
             cash_sales: parseFloat(paymentResult.rows[0].cash_sales) || 0,
             electronic_sales: parseFloat(paymentResult.rows[0].electronic_sales) || 0,
-            credit_sales: parseFloat(paymentResult.rows[0].credit_sales) || 0
+            credit_sales: parseFloat(paymentResult.rows[0].credit_sales) || 0,
+            other_sales: parseFloat(paymentResult.rows[0].other_sales) || 0
         };
         
         console.log('Daily report response:', response);
@@ -825,13 +842,18 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             gross_profit: 0, 
             unique_customers: 0,
             net_profit: 0,
-            total_expenses: 0
+            total_expenses: 0,
+            cash_sales: 0,
+            electronic_sales: 0,
+            credit_sales: 0,
+            other_sales: 0,
+            revenue_growth: 0
         });
     }
 });
 
 // ============================================
-// FIXED MONTHLY REPORT ENDPOINT
+// COMPLETE MONTHLY REPORT WITH PAYMENT BREAKDOWN
 // ============================================
 app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
@@ -839,7 +861,13 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
         const targetMonth = month || new Date().getMonth() + 1;
         const targetYear = year || new Date().getFullYear();
         
-        console.log(`Generating monthly report for: ${targetMonth}/${targetYear}, business: ${req.user.business_id}`);
+        // Calculate previous month
+        let prevMonth = targetMonth - 1;
+        let prevYear = targetYear;
+        if (prevMonth === 0) {
+            prevMonth = 12;
+            prevYear = targetYear - 1;
+        }
         
         // Get sales summary
         const salesResult = await pool.query(`
@@ -871,7 +899,7 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND s.status = 'completed'
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        // Get expenses for the month
+        // Get expenses
         const expenseResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses
@@ -880,10 +908,35 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND EXTRACT(YEAR FROM expense_date) = $3
         `, [req.user.business_id, targetMonth, targetYear]);
         
+        // Get payment method breakdown
+        const paymentResult = await pool.query(`
+            SELECT 
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_method) = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_method) IN ('telebirr', 'cbe_birr', 'cbe', 'bank_transfer', 'digital') THEN s.total_amount ELSE 0 END), 0) as electronic_sales,
+                COALESCE(SUM(CASE WHEN LOWER(s.payment_status) = 'credit' THEN s.total_amount ELSE 0 END), 0) as credit_sales
+            FROM sales s
+            WHERE s.business_id = $1 
+            AND EXTRACT(MONTH FROM s.sale_date) = $2 
+            AND EXTRACT(YEAR FROM s.sale_date) = $3
+            AND s.status = 'completed'
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        // Get previous month revenue for growth
+        const prevMonthResult = await pool.query(`
+            SELECT COALESCE(SUM(total_amount), 0) as prev_revenue
+            FROM sales
+            WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM sale_date) = $2 
+            AND EXTRACT(YEAR FROM sale_date) = $3
+            AND status = 'completed'
+        `, [req.user.business_id, prevMonth, prevYear]);
+        
         const sales = salesResult.rows[0];
         const grossProfit = parseFloat(profitResult.rows[0].gross_profit) || 0;
         const totalExpenses = parseFloat(expenseResult.rows[0].total_expenses) || 0;
         const netProfit = grossProfit - totalExpenses;
+        const prevRevenue = parseFloat(prevMonthResult.rows[0].prev_revenue) || 0;
+        const revenueGrowth = prevRevenue > 0 ? ((parseFloat(sales.total_revenue) - prevRevenue) / prevRevenue) * 100 : 0;
         
         const response = {
             period: 'monthly',
@@ -897,7 +950,11 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             active_days: parseInt(sales.active_days) || 0,
             gross_profit: grossProfit,
             total_expenses: totalExpenses,
-            net_profit: netProfit
+            net_profit: netProfit,
+            revenue_growth: revenueGrowth,
+            cash_sales: parseFloat(paymentResult.rows[0].cash_sales) || 0,
+            electronic_sales: parseFloat(paymentResult.rows[0].electronic_sales) || 0,
+            credit_sales: parseFloat(paymentResult.rows[0].credit_sales) || 0
         };
         
         console.log('Monthly report response:', response);
