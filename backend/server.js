@@ -736,6 +736,9 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
 // ============================================
 // REPORTS (Updated with Tax and Ethiopian Date)
 // ============================================
+// ============================================
+// FIXED DAILY REPORT (with expenses)
+// ============================================
 app.get('/api/reports/daily', authenticate, async (req, res) => {
     try {
         const today = req.query.date || new Date().toISOString().split('T')[0];
@@ -757,12 +760,32 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        res.json({ date: today, ...result.rows[0], gross_profit: profitResult.rows[0].gross_profit });
+        // ADD THIS: Get expenses for the day
+        const expenseResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            FROM expenses 
+            WHERE business_id = $1 AND expense_date = $2
+        `, [req.user.business_id, today]);
+        
+        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        
+        res.json({ 
+            date: today, 
+            ...result.rows[0], 
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: grossProfit - totalExpenses
+        });
     } catch (error) { 
+        console.error('Daily report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
+// ============================================
+// FIXED MONTHLY REPORT (already good, but ensure profit_amount exists)
+// ============================================
 app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { month, year } = req.query;
@@ -801,8 +824,9 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND EXTRACT(YEAR FROM expense_date) = $3
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
+        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        
         res.json({ 
             period: 'monthly', 
             month: parseInt(targetMonth), 
@@ -813,10 +837,14 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             net_profit: grossProfit - totalExpenses 
         });
     } catch (error) { 
+        console.error('Monthly report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
+// ============================================
+// FIXED YEARLY REPORT
+// ============================================
 app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { year } = req.query;
@@ -863,8 +891,9 @@ app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), asyn
             ORDER BY month
         `, [req.user.business_id, targetYear]);
         
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
+        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        
         res.json({ 
             period: 'yearly', 
             year: parseInt(targetYear), 
@@ -875,10 +904,14 @@ app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), asyn
             monthly_breakdown: monthlyBreakdown.rows 
         });
     } catch (error) { 
+        console.error('Yearly report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
+// ============================================
+// FIXED QUARTERLY REPORT
+// ============================================
 app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { quarter, year } = req.query;
@@ -918,8 +951,9 @@ app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), a
             AND EXTRACT(YEAR FROM expense_date) = $4
         `, [req.user.business_id, startMonth, endMonth, targetYear]);
         
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
+        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        
         res.json({ 
             period: 'quarterly', 
             quarter: parseInt(targetQuarter), 
@@ -931,10 +965,14 @@ app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), a
             net_profit: grossProfit - totalExpenses 
         });
     } catch (error) { 
+        console.error('Quarterly report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
+// ============================================
+// FIXED CUSTOM REPORT
+// ============================================
 app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { from, to } = req.query;
@@ -969,8 +1007,9 @@ app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), asyn
             AND expense_date BETWEEN $2 AND $3
         `, [req.user.business_id, from, to]);
         
-        const totalExpenses = expenseResult.rows[0].total_expenses;
-        const grossProfit = profitResult.rows[0].gross_profit;
+        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        
         res.json({ 
             period: 'custom', 
             from, to, 
@@ -980,10 +1019,14 @@ app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), asyn
             net_profit: grossProfit - totalExpenses 
         });
     } catch (error) { 
+        console.error('Custom report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
+// ============================================
+// FIXED SUMMARY REPORT (with profit)
+// ============================================
 app.get('/api/reports/summary', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1015,18 +1058,32 @@ app.get('/api/reports/summary', authenticate, async (req, res) => {
             FROM sales WHERE business_id = $1 AND status = 'completed'
         `, [req.user.business_id]);
         
+        // ADD TODAY'S PROFIT
+        const todayProfit = await pool.query(`
+            SELECT COALESCE(SUM(si.profit_amount), 0) as profit
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+        `, [req.user.business_id, today]);
+        
         res.json({ 
-            today: todayResult.rows[0], 
-            this_month: monthResult.rows[0], 
-            this_year: yearResult.rows[0], 
+            today: {
+                ...todayResult.rows[0],
+                profit: todayProfit.rows[0].profit || 0
+            },
+            this_month: monthResult.rows[0],
+            this_year: yearResult.rows[0],
             all_time: totalResult.rows[0] 
         });
     } catch (error) { 
+        console.error('Summary report error:', error);
         res.status(500).json({ error: error.message }); 
     }
 });
 
-// Debt Aging Report
+// ============================================
+// DEBT AGING REPORT (CORRECT)
+// ============================================
 app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -1044,8 +1101,10 @@ app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
             GROUP BY c.id, c.full_name, c.phone, c.current_balance
             ORDER BY c.current_balance DESC
         `, [req.user.business_id]);
+        
         res.json({ success: true, data: result.rows });
     } catch (error) {
+        console.error('Debt aging error:', error);
         res.status(500).json({ error: error.message });
     }
 });
