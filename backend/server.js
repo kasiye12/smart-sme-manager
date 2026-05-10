@@ -2126,6 +2126,323 @@ app.get('/api/reports/top-products', authenticate, async (req, res) => {
     }
 });
 
+
+// ============================================
+// PHYSICAL COUNT RECONCILIATION
+// ============================================
+
+// Start a new physical count session
+app.post('/api/physical-count/start', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { notes } = req.body;
+        
+        // Check if there's an active count session
+        const activeSession = await pool.query(
+            `SELECT id FROM physical_count_sessions 
+             WHERE business_id = $1 AND status = 'in_progress'`,
+            [req.user.business_id]
+        );
+        
+        if (activeSession.rows.length > 0) {
+            return res.status(400).json({ 
+                error: 'There is already an active physical count session. Please complete or cancel it first.' 
+            });
+        }
+        
+        const result = await pool.query(
+            `INSERT INTO physical_count_sessions (business_id, user_id, status, notes, started_at)
+             VALUES ($1, $2, 'in_progress', $3, NOW())
+             RETURNING id, session_number`,
+            [req.user.business_id, req.user.id, notes]
+        );
+        
+        // Generate session number
+        const sessionNumber = `PC-${DateTime.now().getFullYear()}${(DateTime.now().getMonth() + 1).toString().padStart(2, '0')}${result.rows[0].id.toString().substring(0, 8)}`;
+        
+        await pool.query(
+            'UPDATE physical_count_sessions SET session_number = $1 WHERE id = $2',
+            [sessionNumber, result.rows[0].id]
+        );
+        
+        res.json({ 
+            success: true, 
+            session_id: result.rows[0].id,
+            session_number: sessionNumber
+        });
+        
+    } catch (error) {
+        console.error('Start physical count error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Save physical count for a product
+app.post('/api/physical-count/save-count', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { session_id, product_id, system_stock, physical_stock, counted_by } = req.body;
+        
+        // Check if session exists and is active
+        const session = await pool.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [session_id, req.user.business_id]
+        );
+        
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        
+        if (session.rows[0].status !== 'in_progress') {
+            return res.status(400).json({ error: 'Session is already completed or cancelled' });
+        }
+        
+        // Check if product already counted in this session
+        const existing = await pool.query(
+            `SELECT id FROM physical_count_items 
+             WHERE session_id = $1 AND product_id = $2`,
+            [session_id, product_id]
+        );
+        
+        if (existing.rows.length > 0) {
+            // Update existing count
+            await pool.query(
+                `UPDATE physical_count_items 
+                 SET physical_stock = $1, counted_at = NOW(), counted_by = $2
+                 WHERE session_id = $3 AND product_id = $4`,
+                [physical_stock, counted_by || req.user.id, session_id, product_id]
+            );
+        } else {
+            // Insert new count
+            await pool.query(
+                `INSERT INTO physical_count_items 
+                 (session_id, product_id, system_stock, physical_stock, counted_by, counted_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())`,
+                [session_id, product_id, system_stock, physical_stock, counted_by || req.user.id]
+            );
+        }
+        
+        res.json({ success: true, message: 'Count saved successfully' });
+        
+    } catch (error) {
+        console.error('Save physical count error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Complete physical count and apply adjustments
+app.post('/api/physical-count/complete', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { session_id, apply_adjustments = true } = req.body;
+        
+        // Get session details
+        const session = await client.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [session_id, req.user.business_id]
+        );
+        
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        
+        if (session.rows[0].status !== 'in_progress') {
+            return res.status(400).json({ error: 'Session is already completed' });
+        }
+        
+        // Get all counts for this session
+        const counts = await client.query(
+            `SELECT pci.*, p.name_translations, p.selling_price
+             FROM physical_count_items pci
+             JOIN products p ON pci.product_id = p.id
+             WHERE pci.session_id = $1`,
+            [session_id]
+        );
+        
+        const adjustments = [];
+        let totalDifference = 0;
+        let totalValueDifference = 0;
+        
+        for (const count of counts.rows) {
+            const difference = count.physical_stock - count.system_stock;
+            const valueDifference = difference * count.selling_price;
+            
+            adjustments.push({
+                product_id: count.product_id,
+                product_name: count.name_translations?.en || 'Product',
+                system_stock: count.system_stock,
+                physical_stock: count.physical_stock,
+                difference: difference,
+                value_difference: valueDifference
+            });
+            
+            totalDifference += difference;
+            totalValueDifference += valueDifference;
+            
+            if (apply_adjustments && difference !== 0) {
+                // Update product stock
+                await client.query(
+                    'UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2',
+                    [count.physical_stock, count.product_id]
+                );
+                
+                // Record stock adjustment
+                const direction = difference > 0 ? 'in' : 'out';
+                await client.query(
+                    `INSERT INTO stock_adjustments 
+                     (business_id, product_id, user_id, adjustment_type, quantity, direction, reason)
+                     VALUES ($1, $2, $3, 'physical_count', $4, $5, $6)`,
+                    [req.user.business_id, count.product_id, req.user.id, Math.abs(difference), direction, `Physical count reconciliation - Session ${session.rows[0].session_number}`]
+                );
+            }
+        }
+        
+        // Update session status
+        await client.query(
+            `UPDATE physical_count_sessions 
+             SET status = 'completed', 
+                 completed_at = NOW(), 
+                 total_products_counted = $1,
+                 total_difference = $2,
+                 total_value_difference = $3
+             WHERE id = $4`,
+            [counts.rows.length, totalDifference, totalValueDifference, session_id]
+        );
+        
+        // Create summary report
+        const summary = {
+            session_number: session.rows[0].session_number,
+            started_at: session.rows[0].started_at,
+            completed_at: new Date(),
+            total_products: counts.rows.length,
+            total_difference: totalDifference,
+            total_value_difference: totalValueDifference,
+            adjustments_made: apply_adjustments,
+            adjustments: adjustments
+        };
+        
+        await client.query('COMMIT');
+        
+        res.json({ 
+            success: true, 
+            message: apply_adjustments ? 'Physical count completed and adjustments applied' : 'Physical count completed (no adjustments applied)',
+            summary: summary
+        });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Complete physical count error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Cancel physical count session
+app.post('/api/physical-count/cancel', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { session_id } = req.body;
+        
+        await pool.query(
+            `UPDATE physical_count_sessions 
+             SET status = 'cancelled', cancelled_at = NOW()
+             WHERE id = $1 AND business_id = $2`,
+            [session_id, req.user.business_id]
+        );
+        
+        res.json({ success: true, message: 'Physical count session cancelled' });
+        
+    } catch (error) {
+        console.error('Cancel physical count error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get physical count history
+app.get('/api/physical-count/history', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { limit = 20, offset = 0 } = req.query;
+        
+        const result = await pool.query(
+            `SELECT pcs.*, u.full_name as created_by_name
+             FROM physical_count_sessions pcs
+             LEFT JOIN users u ON pcs.user_id = u.id
+             WHERE pcs.business_id = $1
+             ORDER BY pcs.created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [req.user.business_id, limit, offset]
+        );
+        
+        res.json({ sessions: result.rows });
+        
+    } catch (error) {
+        console.error('Get physical count history error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get specific physical count session details
+app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const session = await pool.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        
+        const items = await pool.query(
+            `SELECT pci.*, p.name_translations, p.selling_price, p.unit
+             FROM physical_count_items pci
+             JOIN products p ON pci.product_id = p.id
+             WHERE pci.session_id = $1
+             ORDER BY p.name_translations->>'en'`,
+            [id]
+        );
+        
+        res.json({ 
+            session: session.rows[0],
+            items: items.rows
+        });
+        
+    } catch (error) {
+        console.error('Get session details error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// WhatsApp Reminder Endpoint
+app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
+    try {
+        const { customerId, customerName, phone, amount, message } = req.body;
+        
+        // Format phone number for WhatsApp
+        let formattedPhone = phone.replace(/\D/g, '');
+        if (formattedPhone.startsWith('0')) {
+            formattedPhone = '251' + formattedPhone.substring(1);
+        }
+        
+        // For now, log the message
+        console.log(`📱 WhatsApp Reminder to ${formattedPhone}: ${message}`);
+        
+        // Log to database
+        await pool.query(
+            `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
+             VALUES ($1, $2, 'send_whatsapp', 'customer', $3, $4)`,
+            [req.user.business_id, req.user.id, customerId, JSON.stringify({ phone: formattedPhone, amount, message_preview: message.substring(0, 50) })]
+        );
+        
+        res.json({ success: true, message: 'WhatsApp message logged' });
+        
+    } catch (error) {
+        console.error('WhatsApp error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================
 // START SERVER
 // ============================================
