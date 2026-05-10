@@ -2645,23 +2645,20 @@ app.get('/api/test-whatsapp-config', authenticate, async (req, res) => {
 // SALES TARGET ENDPOINTS
 // ============================================
 
-// ============================================
-// COMPLETE SALES TARGET ENDPOINTS
-// ============================================
-
-// Get sales targets (today, monthly, yearly)
+// Get sales targets
 app.get('/api/sales-targets', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
         const thisMonth = new Date().getMonth() + 1;
         const thisYear = new Date().getFullYear();
         
-        // Get today's target
+        // Get or create today's target
         let todayTarget = await pool.query(
             'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_date = $2',
             [req.user.business_id, today]
         );
-        let todayTargetAmount = parseFloat(todayTarget.rows[0]?.target_amount || 0);
+        
+        let targetAmount = todayTarget.rows[0]?.target_amount || 0;
         
         // Get today's sales
         const todaySales = await pool.query(
@@ -2674,7 +2671,8 @@ app.get('/api/sales-targets', authenticate, async (req, res) => {
             'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_month = $2 AND target_year = $3',
             [req.user.business_id, thisMonth, thisYear]
         );
-        let monthTargetAmount = parseFloat(monthTarget.rows[0]?.target_amount || 0);
+        
+        let monthTargetAmount = monthTarget.rows[0]?.target_amount || 0;
         
         // Get month-to-date sales
         const monthSales = await pool.query(
@@ -2687,34 +2685,14 @@ app.get('/api/sales-targets', authenticate, async (req, res) => {
             [req.user.business_id, thisMonth, thisYear]
         );
         
-        // Get yearly target
-        let yearTarget = await pool.query(
-            'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_year = $2 AND target_month IS NULL',
-            [req.user.business_id, thisYear]
-        );
-        let yearTargetAmount = parseFloat(yearTarget.rows[0]?.target_amount || 0);
-        
-        // Get year-to-date sales
-        const yearSales = await pool.query(
-            `SELECT COALESCE(SUM(total_amount), 0) as total 
-             FROM sales 
-             WHERE business_id = $1 
-             AND EXTRACT(YEAR FROM sale_date) = $2 
-             AND status = 'completed'`,
-            [req.user.business_id, thisYear]
-        );
-        
         res.json({
             success: true,
-            today_target: todayTargetAmount,
+            today_target: parseFloat(targetAmount),
             today_sales: parseFloat(todaySales.rows[0].total),
-            month_target: monthTargetAmount,
-            month_sales: parseFloat(monthSales.rows[0].total),
-            year_target: yearTargetAmount,
-            year_sales: parseFloat(yearSales.rows[0].total)
+            month_target: parseFloat(monthTargetAmount),
+            month_sales: parseFloat(monthSales.rows[0].total)
         });
     } catch (error) {
-        console.error('Get targets error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -2733,115 +2711,8 @@ app.post('/api/sales-targets/today', authenticate, async (req, res) => {
             [req.user.business_id, today, target]
         );
         
-        res.json({ success: true, message: 'Daily target set successfully' });
+        res.json({ success: true, message: 'Target set successfully' });
     } catch (error) {
-        console.error('Set daily target error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Set monthly target
-app.post('/api/sales-targets/monthly', authenticate, async (req, res) => {
-    try {
-        const { month, year, target } = req.body;
-        
-        await pool.query(
-            `INSERT INTO sales_targets (business_id, target_month, target_year, target_amount, updated_at)
-             VALUES ($1, $2, $3, $4, NOW())
-             ON CONFLICT (business_id, target_month, target_year) 
-             DO UPDATE SET target_amount = $4, updated_at = NOW()`,
-            [req.user.business_id, month, year, target]
-        );
-        
-        res.json({ success: true, message: 'Monthly target set successfully' });
-    } catch (error) {
-        console.error('Set monthly target error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Set yearly target
-app.post('/api/sales-targets/yearly', authenticate, async (req, res) => {
-    try {
-        const { year, target } = req.body;
-        
-        await pool.query(
-            `INSERT INTO sales_targets (business_id, target_year, target_amount, updated_at)
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (business_id, target_year) WHERE target_month IS NULL
-             DO UPDATE SET target_amount = $3, updated_at = NOW()`,
-            [req.user.business_id, year, target]
-        );
-        
-        res.json({ success: true, message: 'Yearly target set successfully' });
-    } catch (error) {
-        console.error('Set yearly target error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get target history
-app.get('/api/sales-targets/history', authenticate, async (req, res) => {
-    try {
-        const { period, year, month } = req.query;
-        
-        let query = '';
-        let params = [req.user.business_id];
-        
-        if (period === 'daily') {
-            query = `
-                SELECT target_date as date, target_amount, 
-                       COALESCE((
-                           SELECT SUM(total_amount) 
-                           FROM sales 
-                           WHERE business_id = $1 
-                           AND sale_date = st.target_date 
-                           AND status = 'completed'
-                       ), 0) as achieved
-                FROM sales_targets st
-                WHERE business_id = $1 AND target_date IS NOT NULL
-                ORDER BY target_date DESC
-                LIMIT 30
-            `;
-        } else if (period === 'monthly') {
-            query = `
-                SELECT target_month as month, target_year as year, target_amount,
-                       COALESCE((
-                           SELECT SUM(total_amount) 
-                           FROM sales 
-                           WHERE business_id = $1 
-                           AND EXTRACT(MONTH FROM sale_date) = st.target_month
-                           AND EXTRACT(YEAR FROM sale_date) = st.target_year
-                           AND status = 'completed'
-                       ), 0) as achieved
-                FROM sales_targets st
-                WHERE business_id = $1 AND target_month IS NOT NULL
-                ORDER BY target_year DESC, target_month DESC
-                LIMIT 12
-            `;
-        } else if (period === 'yearly') {
-            query = `
-                SELECT target_year as year, target_amount,
-                       COALESCE((
-                           SELECT SUM(total_amount) 
-                           FROM sales 
-                           WHERE business_id = $1 
-                           AND EXTRACT(YEAR FROM sale_date) = st.target_year
-                           AND status = 'completed'
-                       ), 0) as achieved
-                FROM sales_targets st
-                WHERE business_id = $1 AND target_year IS NOT NULL AND target_month IS NULL
-                ORDER BY target_year DESC
-                LIMIT 5
-            `;
-        } else {
-            return res.status(400).json({ error: 'Invalid period' });
-        }
-        
-        const result = await pool.query(query, params);
-        res.json({ success: true, data: result.rows });
-    } catch (error) {
-        console.error('Get history error:', error);
         res.status(500).json({ error: error.message });
     }
 });
