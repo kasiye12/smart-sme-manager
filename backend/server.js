@@ -9,6 +9,10 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const app = express();
 
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
+const META_API_VERSION = 'v18.0';
+
 // ============================================
 // CORS - FIXES FLUTTER CONNECTION ERROR
 // ============================================
@@ -2415,26 +2419,226 @@ app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'man
     }
 });
 
+// ============================================
+// META WHATSAPP CLOUD API (FREE)
+// ============================================
+
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
+const META_API_VERSION = 'v18.0';
+
+// Send WhatsApp message via Meta Cloud API
+async function sendWhatsAppMessage(to, message) {
+    try {
+        // Format Ethiopian phone number
+        let formattedTo = to.replace(/\D/g, '');
+        if (formattedTo.startsWith('0')) {
+            formattedTo = '251' + formattedTo.substring(1);
+        }
+        if (!formattedTo.startsWith('251')) {
+            formattedTo = '251' + formattedTo;
+        }
+        
+        console.log(`📱 Sending WhatsApp to: ${formattedTo}`);
+        
+        const response = await fetch(
+            `https://graph.facebook.com/${META_API_VERSION}/${META_PHONE_NUMBER_ID}/messages`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to: formattedTo,
+                    type: 'text',
+                    text: { 
+                        preview_url: false, 
+                        body: message 
+                    }
+                })
+            }
+        );
+        
+        const result = await response.json();
+        
+        if (result.error) {
+            console.error('Meta API Error:', result.error);
+            return { success: false, error: result.error.message };
+        }
+        
+        console.log('✅ WhatsApp sent:', result.messages?.[0]?.id);
+        return { success: true, messageId: result.messages?.[0]?.id };
+        
+    } catch (error) {
+        console.error('WhatsApp send error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Send WhatsApp template message (for official business accounts)
+async function sendWhatsAppTemplate(to, templateName, language = 'en', components = []) {
+    try {
+        let formattedTo = to.replace(/\D/g, '');
+        if (formattedTo.startsWith('0')) {
+            formattedTo = '251' + formattedTo.substring(1);
+        }
+        
+        const response = await fetch(
+            `https://graph.facebook.com/${META_API_VERSION}/${META_PHONE_NUMBER_ID}/messages`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    messaging_product: 'whatsapp',
+                    recipient_type: 'individual',
+                    to: formattedTo,
+                    type: 'template',
+                    template: {
+                        name: templateName,
+                        language: { code: language },
+                        components: components
+                    }
+                })
+            }
+        );
+        
+        const result = await response.json();
+        
+        if (result.error) {
+            return { success: false, error: result.error.message };
+        }
+        
+        return { success: true, messageId: result.messages?.[0]?.id };
+        
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
 // WhatsApp Reminder Endpoint
 app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
         
-        console.log(`📱 WhatsApp Reminder to ${phone}: ${message.substring(0, 50)}...`);
+        if (!phone) {
+            return res.status(400).json({ error: 'Customer phone number required' });
+        }
+        
+        if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
+            return res.status(500).json({ 
+                error: 'WhatsApp API not configured. Please set META_ACCESS_TOKEN and META_PHONE_NUMBER_ID.',
+                demo: true 
+            });
+        }
+        
+        // Personalize message
+        const personalizedMessage = message
+            .replace(/{name}/g, customerName)
+            .replace(/{amount}/g, `${amount.toFixed(2)} ETB`);
+        
+        // Send via Meta API
+        const result = await sendWhatsAppMessage(phone, personalizedMessage);
         
         // Log to database
         await pool.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'send_whatsapp', 'customer', $3, $4)`,
-            [req.user.business_id, req.user.id, customerId, JSON.stringify({ phone, amount, message_preview: message.substring(0, 50) })]
+            [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
+                phone, 
+                amount, 
+                success: result.success,
+                message_preview: personalizedMessage.substring(0, 50)
+            })]
         );
         
-        res.json({ success: true, message: 'WhatsApp message logged' });
+        if (result.success) {
+            res.json({ 
+                success: true, 
+                message: 'WhatsApp message sent successfully',
+                messageId: result.messageId
+            });
+        } else {
+            res.json({ success: false, error: result.error });
+        }
         
     } catch (error) {
         console.error('WhatsApp error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// Bulk WhatsApp Reminder
+app.post('/api/send-whatsapp-bulk', authenticate, async (req, res) => {
+    try {
+        const { customerIds, message } = req.body;
+        
+        if (!customerIds || customerIds.length === 0) {
+            return res.status(400).json({ error: 'No customers selected' });
+        }
+        
+        const results = [];
+        
+        for (const customerId of customerIds) {
+            const customer = await pool.query(
+                'SELECT full_name, phone, current_balance FROM customers WHERE id = $1 AND business_id = $2',
+                [customerId, req.user.business_id]
+            );
+            
+            if (customer.rows.length > 0 && customer.rows[0].phone) {
+                const personalizedMessage = message
+                    .replace(/{name}/g, customer.rows[0].full_name)
+                    .replace(/{amount}/g, `${customer.rows[0].current_balance} ETB`);
+                
+                const result = await sendWhatsAppMessage(customer.rows[0].phone, personalizedMessage);
+                
+                results.push({
+                    customerId,
+                    customerName: customer.rows[0].full_name,
+                    phone: customer.rows[0].phone,
+                    success: result.success,
+                    error: result.error
+                });
+                
+                // Add small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+        
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.length - successCount;
+        
+        res.json({
+            success: true,
+            total: results.length,
+            successCount,
+            failCount,
+            results
+        });
+        
+    } catch (error) {
+        console.error('Bulk WhatsApp error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Test WhatsApp Configuration
+app.get('/api/test-whatsapp-config', authenticate, async (req, res) => {
+    const isConfigured = !!(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
+    
+    res.json({
+        configured: isConfigured,
+        message: isConfigured 
+            ? 'WhatsApp API is configured and ready to use'
+            : 'WhatsApp API not configured. Please set environment variables.',
+        phoneNumberId: META_PHONE_NUMBER_ID ? 'Set' : 'Not set',
+        accessToken: META_ACCESS_TOKEN ? 'Set' : 'Not set'
+    });
 });
 // ============================================
 // START SERVER
