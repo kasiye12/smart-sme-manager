@@ -737,58 +737,101 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
     } finally { client.release(); }
 });
 
-// ============================================
-// REPORTS (Updated with Tax and Ethiopian Date)
-// ============================================
-// ============================================
-// FIXED DAILY REPORT (with expenses)
+/// ============================================
+// FIXED DAILY REPORT ENDPOINT
 // ============================================
 app.get('/api/reports/daily', authenticate, async (req, res) => {
     try {
         const today = req.query.date || new Date().toISOString().split('T')[0];
         
-        const result = await pool.query(`
+        console.log(`Generating daily report for: ${today}, business: ${req.user.business_id}`);
+        
+        // Get sales summary with correct calculations
+        const salesResult = await pool.query(`
             SELECT 
-                COUNT(*) as total_sales, 
-                COALESCE(SUM(total_amount), 0) as total_revenue, 
-                COALESCE(SUM(tax_amount), 0) as total_tax, 
-                COUNT(DISTINCT customer_id) as unique_customers 
-            FROM sales 
-            WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+                COUNT(*) as total_sales,
+                COALESCE(SUM(s.total_amount), 0) as total_revenue,
+                COALESCE(SUM(s.tax_amount), 0) as total_tax,
+                COUNT(DISTINCT s.customer_id) as unique_customers,
+                COUNT(DISTINCT s.sale_date) as active_days,
+                COALESCE(SUM(s.discount_amount), 0) as total_discounts
+            FROM sales s
+            WHERE s.business_id = $1 
+            AND s.sale_date = $2 
+            AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
+        // Calculate GROSS PROFIT from products (Revenue - COGS)
         const profitResult = await pool.query(`
-            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
-            FROM sale_items si 
-            JOIN sales s ON si.sale_id = s.id 
-            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+            SELECT COALESCE(SUM(
+                (si.unit_price - COALESCE(p.cost_price, 0)) * si.quantity
+            ), 0) as gross_profit
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 
+            AND s.sale_date = $2 
+            AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // ADD THIS: Get expenses for the day
+        // Get expenses for the day
         const expenseResult = await pool.query(`
-            SELECT COALESCE(SUM(amount), 0) as total_expenses 
+            SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses 
             WHERE business_id = $1 AND expense_date = $2
         `, [req.user.business_id, today]);
         
-        const grossProfit = profitResult.rows[0].gross_profit || 0;
-        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
+        // Get payment method breakdown
+        const paymentResult = await pool.query(`
+            SELECT 
+                COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total_amount ELSE 0 END), 0) as cash_sales,
+                COALESCE(SUM(CASE WHEN payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN total_amount ELSE 0 END), 0) as electronic_sales,
+                COALESCE(SUM(CASE WHEN payment_status = 'credit' THEN total_amount ELSE 0 END), 0) as credit_sales
+            FROM sales
+            WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+        `, [req.user.business_id, today]);
         
-        res.json({ 
-            date: today, 
-            ...result.rows[0], 
+        const sales = salesResult.rows[0];
+        const grossProfit = parseFloat(profitResult.rows[0].gross_profit) || 0;
+        const totalExpenses = parseFloat(expenseResult.rows[0].total_expenses) || 0;
+        const netProfit = grossProfit - totalExpenses;
+        
+        const response = {
+            date: today,
+            total_sales: parseInt(sales.total_sales) || 0,
+            total_revenue: parseFloat(sales.total_revenue) || 0,
+            total_tax: parseFloat(sales.total_tax) || 0,
+            unique_customers: parseInt(sales.unique_customers) || 0,
+            active_days: parseInt(sales.active_days) || 1,
+            total_discounts: parseFloat(sales.total_discounts) || 0,
             gross_profit: grossProfit,
             total_expenses: totalExpenses,
-            net_profit: grossProfit - totalExpenses
-        });
+            net_profit: netProfit,
+            cash_sales: parseFloat(paymentResult.rows[0].cash_sales) || 0,
+            electronic_sales: parseFloat(paymentResult.rows[0].electronic_sales) || 0,
+            credit_sales: parseFloat(paymentResult.rows[0].credit_sales) || 0
+        };
+        
+        console.log('Daily report response:', response);
+        res.json(response);
+        
     } catch (error) { 
         console.error('Daily report error:', error);
-        res.status(500).json({ error: error.message }); 
+        res.status(500).json({ 
+            error: error.message,
+            total_sales: 0, 
+            total_revenue: 0, 
+            total_tax: 0, 
+            gross_profit: 0, 
+            unique_customers: 0,
+            net_profit: 0,
+            total_expenses: 0
+        });
     }
 });
 
 // ============================================
-// FIXED MONTHLY REPORT (already good, but ensure profit_amount exists)
+// FIXED MONTHLY REPORT ENDPOINT
 // ============================================
 app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
@@ -796,53 +839,73 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
         const targetMonth = month || new Date().getMonth() + 1;
         const targetYear = year || new Date().getFullYear();
         
-        const result = await pool.query(`
-            SELECT 
-                COUNT(*) as total_sales, 
-                COALESCE(SUM(total_amount), 0) as total_revenue, 
-                COALESCE(SUM(tax_amount), 0) as total_tax, 
-                COALESCE(SUM(discount_amount), 0) as total_discounts, 
-                COUNT(DISTINCT customer_id) as unique_customers, 
-                COUNT(DISTINCT sale_date) as active_days 
-            FROM sales 
-            WHERE business_id = $1 
-            AND EXTRACT(MONTH FROM sale_date) = $2 
-            AND EXTRACT(YEAR FROM sale_date) = $3 
-            AND status = 'completed'
-        `, [req.user.business_id, targetMonth, targetYear]);
+        console.log(`Generating monthly report for: ${targetMonth}/${targetYear}, business: ${req.user.business_id}`);
         
-        const profitResult = await pool.query(`
-            SELECT COALESCE(SUM(si.profit_amount), 0) as gross_profit 
-            FROM sale_items si 
-            JOIN sales s ON si.sale_id = s.id 
+        // Get sales summary
+        const salesResult = await pool.query(`
+            SELECT 
+                COUNT(*) as total_sales,
+                COALESCE(SUM(s.total_amount), 0) as total_revenue,
+                COALESCE(SUM(s.tax_amount), 0) as total_tax,
+                COALESCE(SUM(s.discount_amount), 0) as total_discounts,
+                COUNT(DISTINCT s.customer_id) as unique_customers,
+                COUNT(DISTINCT s.sale_date) as active_days
+            FROM sales s
             WHERE s.business_id = $1 
             AND EXTRACT(MONTH FROM s.sale_date) = $2 
             AND EXTRACT(YEAR FROM s.sale_date) = $3
+            AND s.status = 'completed'
         `, [req.user.business_id, targetMonth, targetYear]);
         
+        // Calculate GROSS PROFIT
+        const profitResult = await pool.query(`
+            SELECT COALESCE(SUM(
+                (si.unit_price - COALESCE(p.cost_price, 0)) * si.quantity
+            ), 0) as gross_profit
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            LEFT JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 
+            AND EXTRACT(MONTH FROM s.sale_date) = $2 
+            AND EXTRACT(YEAR FROM s.sale_date) = $3
+            AND s.status = 'completed'
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        // Get expenses for the month
         const expenseResult = await pool.query(`
-            SELECT COALESCE(SUM(amount), 0) as total_expenses 
-            FROM expenses 
+            SELECT COALESCE(SUM(amount), 0) as total_expenses
+            FROM expenses
             WHERE business_id = $1 
             AND EXTRACT(MONTH FROM expense_date) = $2 
             AND EXTRACT(YEAR FROM expense_date) = $3
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        const totalExpenses = expenseResult.rows[0].total_expenses || 0;
-        const grossProfit = profitResult.rows[0].gross_profit || 0;
+        const sales = salesResult.rows[0];
+        const grossProfit = parseFloat(profitResult.rows[0].gross_profit) || 0;
+        const totalExpenses = parseFloat(expenseResult.rows[0].total_expenses) || 0;
+        const netProfit = grossProfit - totalExpenses;
         
-        res.json({ 
-            period: 'monthly', 
-            month: parseInt(targetMonth), 
-            year: parseInt(targetYear), 
-            ...result.rows[0], 
-            gross_profit: grossProfit, 
-            total_expenses: totalExpenses, 
-            net_profit: grossProfit - totalExpenses 
-        });
+        const response = {
+            period: 'monthly',
+            month: parseInt(targetMonth),
+            year: parseInt(targetYear),
+            total_sales: parseInt(sales.total_sales) || 0,
+            total_revenue: parseFloat(sales.total_revenue) || 0,
+            total_tax: parseFloat(sales.total_tax) || 0,
+            total_discounts: parseFloat(sales.total_discounts) || 0,
+            unique_customers: parseInt(sales.unique_customers) || 0,
+            active_days: parseInt(sales.active_days) || 0,
+            gross_profit: grossProfit,
+            total_expenses: totalExpenses,
+            net_profit: netProfit
+        };
+        
+        console.log('Monthly report response:', response);
+        res.json(response);
+        
     } catch (error) { 
         console.error('Monthly report error:', error);
-        res.status(500).json({ error: error.message }); 
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -2059,53 +2122,58 @@ app.get('/api/users/:id/has-pin', authenticate, authorize('owner', 'manager'), a
 });
 
 // ============================================
-// TOP SELLING PRODUCTS
+// FIXED TOP PRODUCTS ENDPOINT
 // ============================================
 app.get('/api/reports/top-products', authenticate, async (req, res) => {
     try {
         const { period, date, month, year, quarter, from, to } = req.query;
         
+        console.log(`Top products request - period: ${period}, date: ${date}, business: ${req.user.business_id}`);
+        
         let dateCondition = '';
         let params = [req.user.business_id];
+        let paramCount = 2;
         
         if (period === 'daily' && date) {
-            dateCondition = `AND s.sale_date = $${params.length + 1}`;
+            dateCondition = `AND s.sale_date = $${paramCount++}`;
             params.push(date);
         } else if (period === 'monthly' && month && year) {
-            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) = $${params.length + 1} 
-                            AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 2}`;
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) = $${paramCount++} 
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
             params.push(month, year);
         } else if (period === 'quarterly' && quarter && year) {
             const startMonth = (quarter - 1) * 3 + 1;
             const endMonth = startMonth + 2;
-            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $${params.length + 1} AND $${params.length + 2}
-                            AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 3}`;
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $${paramCount++} AND $${paramCount++}
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
             params.push(startMonth, endMonth, year);
         } else if (period === 'yearly' && year) {
-            dateCondition = `AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 1}`;
+            dateCondition = `AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
             params.push(year);
         } else if (period === 'custom' && from && to) {
-            dateCondition = `AND s.sale_date BETWEEN $${params.length + 1} AND $${params.length + 2}`;
+            dateCondition = `AND s.sale_date BETWEEN $${paramCount++} AND $${paramCount++}`;
             params.push(from, to);
         } else {
             // Default to today
             const today = new Date().toISOString().split('T')[0];
-            dateCondition = `AND s.sale_date = $${params.length + 1}`;
+            dateCondition = `AND s.sale_date = $${paramCount++}`;
             params.push(today);
         }
         
+        // Get total revenue for percentage calculation
         const totalRevenueQuery = await pool.query(`
-            SELECT COALESCE(SUM(s.total_amount), 0) as total_revenue
+            SELECT COALESCE(SUM(s.total_amount), 1) as total_revenue
             FROM sales s
             WHERE s.business_id = $1 AND s.status = 'completed'
             ${dateCondition}
         `, params);
         
-        const totalRevenue = totalRevenueQuery.rows[0].total_revenue;
+        const totalRevenue = parseFloat(totalRevenueQuery.rows[0]?.total_revenue || 1);
         
+        // Get top products
         const productsQuery = await pool.query(`
             SELECT 
-                p.name_translations->>'en' as product_name,
+                COALESCE(p.name_translations->>'en', 'Unknown') as product_name,
                 COALESCE(SUM(si.quantity), 0) as total_quantity,
                 COALESCE(SUM(si.total_price), 0) as total_revenue
             FROM sale_items si
@@ -2119,17 +2187,21 @@ app.get('/api/reports/top-products', authenticate, async (req, res) => {
         `, params);
         
         const products = productsQuery.rows.map(row => ({
-            ...row,
-            percentage: totalRevenue > 0 ? (row.total_revenue / totalRevenue) * 100 : 0
+            product_name: row.product_name,
+            total_quantity: parseInt(row.total_quantity),
+            total_revenue: parseFloat(row.total_revenue),
+            percentage: (parseFloat(row.total_revenue) / totalRevenue) * 100
         }));
         
-        res.json({ products });
+        console.log(`Found ${products.length} top products, total revenue: ${totalRevenue}`);
+        
+        res.json({ products: products });
+        
     } catch (error) {
         console.error('Top products error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: error.message, products: [] });
     }
 });
-
 
 // ============================================
 // PHYSICAL COUNT RECONCILIATION
