@@ -2055,6 +2055,78 @@ app.get('/api/users/:id/has-pin', authenticate, authorize('owner', 'manager'), a
 });
 
 // ============================================
+// TOP SELLING PRODUCTS
+// ============================================
+app.get('/api/reports/top-products', authenticate, async (req, res) => {
+    try {
+        const { period, date, month, year, quarter, from, to } = req.query;
+        
+        let dateCondition = '';
+        let params = [req.user.business_id];
+        
+        if (period === 'daily' && date) {
+            dateCondition = `AND s.sale_date = $${params.length + 1}`;
+            params.push(date);
+        } else if (period === 'monthly' && month && year) {
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) = $${params.length + 1} 
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 2}`;
+            params.push(month, year);
+        } else if (period === 'quarterly' && quarter && year) {
+            const startMonth = (quarter - 1) * 3 + 1;
+            const endMonth = startMonth + 2;
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $${params.length + 1} AND $${params.length + 2}
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 3}`;
+            params.push(startMonth, endMonth, year);
+        } else if (period === 'yearly' && year) {
+            dateCondition = `AND EXTRACT(YEAR FROM s.sale_date) = $${params.length + 1}`;
+            params.push(year);
+        } else if (period === 'custom' && from && to) {
+            dateCondition = `AND s.sale_date BETWEEN $${params.length + 1} AND $${params.length + 2}`;
+            params.push(from, to);
+        } else {
+            // Default to today
+            const today = new Date().toISOString().split('T')[0];
+            dateCondition = `AND s.sale_date = $${params.length + 1}`;
+            params.push(today);
+        }
+        
+        const totalRevenueQuery = await pool.query(`
+            SELECT COALESCE(SUM(s.total_amount), 0) as total_revenue
+            FROM sales s
+            WHERE s.business_id = $1 AND s.status = 'completed'
+            ${dateCondition}
+        `, params);
+        
+        const totalRevenue = totalRevenueQuery.rows[0].total_revenue;
+        
+        const productsQuery = await pool.query(`
+            SELECT 
+                p.name_translations->>'en' as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 AND s.status = 'completed'
+            ${dateCondition}
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 10
+        `, params);
+        
+        const products = productsQuery.rows.map(row => ({
+            ...row,
+            percentage: totalRevenue > 0 ? (row.total_revenue / totalRevenue) * 100 : 0
+        }));
+        
+        res.json({ products });
+    } catch (error) {
+        console.error('Top products error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
