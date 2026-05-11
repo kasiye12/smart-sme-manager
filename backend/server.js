@@ -3434,7 +3434,9 @@ app.delete('/api/expenses/:id', authenticate, authorize('owner', 'manager'), asy
             'DELETE FROM expenses WHERE id = $1 AND business_id = $2 RETURNING id',
             [id, req.user.business_id]
         );
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Expense not found' });
+        }
         res.json({ success: true, message: 'Expense deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: error.message });
