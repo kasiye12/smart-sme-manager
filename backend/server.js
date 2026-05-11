@@ -1317,7 +1317,7 @@ app.get('/api/inventory/adjustments', authenticate, authorize('owner', 'manager'
 // ============================================
 // DAILY CASH-OUT (Z-REPORT)
 // ============================================
-a// Add these if not already present in your server.js
+// Add these if not already present in your server.js
 
 // ============================================
 // CASH-OUT (Z-REPORT) ENDPOINTS
