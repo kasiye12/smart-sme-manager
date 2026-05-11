@@ -1317,6 +1317,13 @@ app.get('/api/inventory/adjustments', authenticate, authorize('owner', 'manager'
 // ============================================
 // DAILY CASH-OUT (Z-REPORT)
 // ============================================
+a// Add these if not already present in your server.js
+
+// ============================================
+// CASH-OUT (Z-REPORT) ENDPOINTS
+// ============================================
+
+// Get cash-out status
 app.get('/api/cashout/status', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1325,13 +1332,17 @@ app.get('/api/cashout/status', authenticate, async (req, res) => {
             [req.user.business_id, today]
         );
         
-        const isClosed = result.rows.length > 0 && result.rows[0].is_closed;
-        res.json({ is_closed: isClosed, cashout: result.rows[0] || null });
+        const isClosed = result.rows.length > 0 && result.rows[0].is_closed === true;
+        res.json({ 
+            is_closed: isClosed,
+            cashout: result.rows[0] || null
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
+// Get cash-out summary
 app.get('/api/cashout/summary', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1364,16 +1375,89 @@ app.get('/api/cashout/summary', authenticate, async (req, res) => {
         );
         
         const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
+        const expectedCashBalance = openingBalance + parseFloat(salesResult.rows[0].cash_sales) - parseFloat(expensesResult.rows[0].total_expenses);
         
-        const summary = salesResult.rows[0];
-        summary.total_expenses = parseFloat(expensesResult.rows[0].total_expenses || 0);
-        summary.opening_cash_balance = openingBalance;
-        summary.expected_cash_balance = openingBalance + (summary.cash_sales || 0) - summary.total_expenses;
-        
-        res.json({ success: true, summary });
+        res.json({ 
+            summary: {
+                ...salesResult.rows[0],
+                total_expenses: parseFloat(expensesResult.rows[0].total_expenses),
+                opening_cash_balance: openingBalance,
+                expected_cash_balance: expectedCashBalance
+            }
+        });
     } catch (error) {
-        console.error('Cashout summary error:', error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Close cash-out
+app.post('/api/cashout/close', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { 
+            actual_cash_balance, notes, total_sales, total_cash_sales,
+            total_credit_sales, total_electronic_sales, total_tax, 
+            total_expenses, opening_cash_balance 
+        } = req.body;
+        
+        const today = new Date().toISOString().split('T')[0];
+        const expected_cash_balance = (opening_cash_balance || 0) + (total_cash_sales || 0) - (total_expenses || 0);
+        const cash_difference = actual_cash_balance - expected_cash_balance;
+        
+        const existing = await client.query(
+            'SELECT id FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2',
+            [req.user.business_id, today]
+        );
+        
+        let result;
+        if (existing.rows.length > 0) {
+            result = await client.query(`
+                UPDATE daily_cashouts SET
+                    total_sales = $1, total_cash_sales = $2, total_credit_sales = $3,
+                    total_electronic_sales = $4, total_tax = $5, total_expenses = $6,
+                    opening_cash_balance = $7, expected_cash_balance = $8,
+                    actual_cash_balance = $9, cash_difference = $10, notes = $11,
+                    is_closed = true, closed_at = NOW(), updated_at = NOW()
+                WHERE business_id = $12 AND cashout_date = $13
+                RETURNING *
+            `, [
+                total_sales, total_cash_sales, total_credit_sales, total_electronic_sales,
+                total_tax, total_expenses, opening_cash_balance, expected_cash_balance,
+                actual_cash_balance, cash_difference, notes, req.user.business_id, today
+            ]);
+        } else {
+            result = await client.query(`
+                INSERT INTO daily_cashouts (
+                    business_id, user_id, cashout_date, total_sales, total_cash_sales,
+                    total_credit_sales, total_electronic_sales, total_tax, total_expenses,
+                    opening_cash_balance, expected_cash_balance, actual_cash_balance,
+                    cash_difference, notes, is_closed, closed_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, NOW())
+                RETURNING *
+            `, [
+                req.user.business_id, req.user.id, today, total_sales, total_cash_sales,
+                total_credit_sales, total_electronic_sales, total_tax, total_expenses,
+                opening_cash_balance, expected_cash_balance, actual_cash_balance,
+                cash_difference, notes
+            ]);
+        }
+        
+        await client.query('COMMIT');
+        
+        res.json({ 
+            success: true, 
+            message: 'Cash-out closed successfully',
+            cashout: result.rows[0],
+            difference: cash_difference
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Cashout close error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
     }
 });
 
