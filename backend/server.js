@@ -3175,9 +3175,16 @@ app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'man
     }
 });
 
+app.get('/api/app-version', async (req, res) => {
+    res.json({
+        latest_version: '1.0.0',
+        download_url: 'https://your-server.com/SmartSME.apk',
+        update_required: false
+    });
+});
+
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 app.use(Sentry.Handlers.errorHandler());
-
 // ============================================
 // START SERVER
 // ============================================
