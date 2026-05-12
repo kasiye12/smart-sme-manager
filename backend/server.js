@@ -3383,6 +3383,19 @@ app.put('/api/admin/clients/:id/toggle-status', authenticate, async (req, res) =
         res.status(500).json({ error: error.message });
     }
 });
+
+app.get('/api/announcements', authenticate, async (req, res) => {
+    try {
+        // Get latest announcement for this business
+        const result = await pool.query(
+            'SELECT message FROM announcements WHERE business_id = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1',
+            [req.user.business_id]
+        );
+        res.json(result.rows[0] || { message: null });
+    } catch (error) {
+        res.json({ message: null });
+    }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
