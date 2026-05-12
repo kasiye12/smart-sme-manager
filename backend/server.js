@@ -3258,41 +3258,32 @@ app.put('/api/admin/clients/:id', authenticate, async (req, res) => {
     }
 });
 
-// Record client payment
 app.post('/api/admin/clients/:id/payment', authenticate, async (req, res) => {
-    const client = await pool.connect();
     try {
-        await client.query('BEGIN');
-        
         const { id } = req.params;
-        const { amount, payment_method, receipt_number, notes } = req.body;
+        const { amount, payment_method } = req.body;
         
         if (!amount || amount <= 0) {
-            return res.status(400).json({ error: 'Valid amount required' });
+            return res.status(400).json({ error: 'Valid amount is required' });
         }
         
-        // Insert payment record
-        await client.query(
-            `INSERT INTO client_payments (client_id, amount, payment_method, receipt_number, notes, recorded_by)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [id, amount, payment_method || 'cash', receipt_number || null, notes || null, req.user.id]
+        // Insert payment WITHOUT receipt_number
+        await pool.query(
+            `INSERT INTO client_payments (client_id, amount, payment_method, recorded_by)
+             VALUES ($1, $2, $3, $4)`,
+            [id, amount, payment_method || 'cash', req.user.id]
         );
         
-        // Update client total paid
-        await client.query(
+        // Update client total
+        await pool.query(
             'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
             [amount, 'paid', id]
         );
         
-        await client.query('COMMIT');
-        
         res.json({ success: true, message: 'Payment recorded successfully' });
     } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Record payment error:', error);
+        console.error('Payment error:', error);
         res.status(500).json({ error: error.message });
-    } finally {
-        client.release();
     }
 });
 
