@@ -3192,7 +3192,7 @@ app.post('/api/admin/clients', async (req, res) => {
     } catch (error) { res.json({ clients: [] }); }
 });
 
-app.post('/api/admin/clients', authenticate, async (req, res) => {
+app.post('/api/admin/clients', async (req, res) => {
     try {
         const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
         if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'All fields required' });
