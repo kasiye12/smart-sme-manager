@@ -1923,16 +1923,36 @@ app.get('/api/z-report/status', authenticate, async (req, res) => {
     }
 });
 
-// ============================================
-// USER MANAGEMENT ENDPOINTS
-// ============================================
-app.get('/api/users', authenticate, async (req, res) => {
+app.post('/api/users', authenticate, async (req, res) => {
     try {
+        const { full_name, phone, password, role, pin_code } = req.body;
+        
+        if (!full_name || !phone || !password || !role) {
+            return res.status(400).json({ error: 'All fields required' });
+        }
+        if (!['owner', 'manager', 'cashier'].includes(role)) {
+            return res.status(400).json({ error: 'Invalid role' });
+        }
+        
+        // ✅ ADD THIS: Prevent managers from creating owner/admin
+        if (req.user.role === 'manager' && ['owner', 'admin'].includes(role)) {
+            return res.status(403).json({ error: 'You can only add cashiers or managers' });
+        }
+        
+        const existing = await pool.query('SELECT id FROM users WHERE phone = $1 AND business_id = $2', [phone, req.user.business_id]);
+        if (existing.rows.length > 0) {
+            return res.status(400).json({ error: 'Phone number already exists' });
+        }
+        
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
         const result = await pool.query(
-            'SELECT id, full_name, phone, role, is_active, pin_code, created_at FROM users WHERE business_id = $1 ORDER BY created_at',
-            [req.user.business_id]
+            'INSERT INTO users (business_id, full_name, phone, password_hash, role, pin_code) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [req.user.business_id, full_name, phone, hashedPassword, role, pin_code || null]
         );
-        res.json({ users: result.rows });
+        
+        res.status(201).json({ success: true, user_id: result.rows[0].id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
