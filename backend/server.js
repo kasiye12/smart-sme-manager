@@ -3397,7 +3397,130 @@ app.get('/api/announcements', authenticate, async (req, res) => {
     }
 });
 
+// ============================================
+// SUBSCRIPTION MANAGEMENT
+// ============================================
 
+// Get all businesses subscription status (Admin)
+app.get('/api/admin/subscriptions', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { status } = req.query; // paid, unpaid, expired, trial
+        
+        let query = `
+            SELECT 
+                b.id, b.name, b.owner_name, b.phone,
+                b.subscription_plan, b.monthly_fee, 
+                b.subscription_end_date, b.payment_due_date,
+                b.is_active,
+                (SELECT COALESCE(SUM(sp.amount), 0) FROM subscription_payments sp WHERE sp.business_id = b.id) as total_paid,
+                CASE 
+                    WHEN b.subscription_plan = 'trial' THEN 'trial'
+                    WHEN b.payment_due_date < CURRENT_DATE THEN 'overdue'
+                    WHEN b.subscription_end_date < CURRENT_DATE THEN 'expired'
+                    ELSE 'active'
+                END as payment_status
+            FROM businesses b
+            WHERE 1=1
+        `;
+        const params = [];
+        
+        if (status === 'paid') {
+            query += ` AND b.payment_due_date >= CURRENT_DATE`;
+        } else if (status === 'unpaid' || status === 'overdue') {
+            query += ` AND (b.payment_due_date < CURRENT_DATE OR b.payment_due_date IS NULL)`;
+        } else if (status === 'trial') {
+            query += ` AND b.subscription_plan = 'trial'`;
+        }
+        
+        query += ` ORDER BY b.payment_due_date ASC NULLS LAST`;
+        
+        const result = await pool.query(query, params);
+        res.json({ subscriptions: result.rows, total: result.rows.length });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Record subscription payment
+app.post('/api/admin/subscriptions/:businessId/payment', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { businessId } = req.params;
+        const { amount, payment_method, notes } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount required' });
+        }
+        
+        // Record payment
+        await pool.query(
+            `INSERT INTO subscription_payments (business_id, amount, payment_method, notes, created_by)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [businessId, amount, payment_method || 'cash', notes, req.user.id]
+        );
+        
+        // Update payment due date (extend by 30 days)
+        await pool.query(`
+            UPDATE businesses SET 
+                payment_due_date = COALESCE(payment_due_date, CURRENT_DATE) + INTERVAL '30 days',
+                subscription_end_date = COALESCE(subscription_end_date, CURRENT_DATE) + INTERVAL '30 days',
+                updated_at = NOW()
+            WHERE id = $1
+        `, [businessId]);
+        
+        res.json({ success: true, message: 'Payment recorded successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get subscription payment history
+app.get('/api/admin/subscriptions/:businessId/history', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { businessId } = req.params;
+        const result = await pool.query(
+            `SELECT sp.*, u.full_name as recorded_by_name
+             FROM subscription_payments sp
+             LEFT JOIN users u ON sp.created_by = u.id
+             WHERE sp.business_id = $1
+             ORDER BY sp.created_at DESC`,
+            [businessId]
+        );
+        res.json({ payments: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Check own subscription status
+app.get('/api/subscription/status', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT 
+                subscription_plan, monthly_fee, 
+                subscription_end_date, payment_due_date,
+                (SELECT COALESCE(SUM(amount), 0) FROM subscription_payments WHERE business_id = $1) as total_paid
+             FROM businesses WHERE id = $1`,
+            [req.user.business_id]
+        );
+        
+        const biz = result.rows[0];
+        const isOverdue = biz.payment_due_date && new Date(biz.payment_due_date) < new Date();
+        const isExpired = biz.subscription_end_date && new Date(biz.subscription_end_date) < new Date();
+        
+        res.json({
+            ...biz,
+            is_overdue: isOverdue,
+            is_expired: isExpired,
+            days_until_due: biz.payment_due_date 
+                ? Math.ceil((new Date(biz.payment_due_date) - new Date()) / (1000 * 60 * 60 * 24))
+                : null
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
