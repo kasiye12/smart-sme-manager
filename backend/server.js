@@ -3185,7 +3185,7 @@ app.get('/api/app-version', async (req, res) => {
 // ============================================
 // ADMIN PANEL APIs
 // ============================================
-app.get('/api/admin/clients', authenticate, async (req, res) => {
+app.post('/api/admin/clients', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
         res.json({ clients: result.rows });
