@@ -3402,33 +3402,78 @@ app.get('/api/announcements', authenticate, async (req, res) => {
 // ============================================
 
 // ============================================
-// SUBSCRIPTION MANAGEMENT
+// SUBSCRIPTIONS - NOW PULLS FROM CLIENTS TABLE
 // ============================================
 app.get('/api/admin/subscriptions', authenticate, async (req, res) => {
     try {
         const { status } = req.query;
         let query = `
-            SELECT b.id, b.name, b.owner_name, b.phone, b.subscription_plan, b.monthly_fee, 
-                   b.subscription_end_date, b.payment_due_date,
-                   COALESCE((SELECT SUM(sp.amount) FROM subscription_payments sp WHERE sp.business_id = b.id), 0) as total_paid,
-                   CASE 
-                       WHEN b.subscription_plan = 'trial' THEN 'trial'
-                       WHEN b.payment_due_date < CURRENT_DATE THEN 'overdue'
-                       WHEN b.subscription_end_date < CURRENT_DATE THEN 'expired'
-                       ELSE 'active'
-                   END as payment_status
-            FROM businesses b WHERE 1=1`;
-        
+            SELECT 
+                c.id, 
+                c.business_name as name, 
+                c.owner_name, 
+                c.phone,
+                c.subscription_plan, 
+                c.monthly_fee,
+                c.total_paid,
+                c.payment_status,
+                c.is_active,
+                c.created_at,
+                CASE 
+                    WHEN c.subscription_plan = 'trial' THEN 'trial'
+                    WHEN c.payment_status = 'paid' THEN 'active'
+                    WHEN c.payment_status = 'pending' THEN 'overdue'
+                    ELSE 'active'
+                END as status
+            FROM clients c
+            WHERE 1=1
+        `;
         const params = [];
-        if (status === 'paid') { params.push('paid'); query += ` AND b.payment_due_date >= CURRENT_DATE`; }
-        else if (status === 'overdue') { query += ` AND (b.payment_due_date < CURRENT_DATE OR b.payment_due_date IS NULL)`; }
-        else if (status === 'trial') { params.push('trial'); query += ` AND b.subscription_plan = $${params.length}`; }
         
-        query += ` ORDER BY b.payment_due_date ASC NULLS LAST`;
+        if (status === 'paid') {
+            query += ` AND c.payment_status = 'paid'`;
+        } else if (status === 'overdue') {
+            query += ` AND c.payment_status = 'pending'`;
+        } else if (status === 'trial') {
+            query += ` AND c.subscription_plan = 'trial'`;
+        }
+        
+        query += ` ORDER BY c.created_at DESC`;
         
         const result = await pool.query(query, params);
         res.json({ subscriptions: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Record payment for client
+app.post('/api/admin/subscriptions/:id/payment', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, payment_method } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount required' });
+        }
+        
+        // Update client total paid
+        await pool.query(
+            'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
+            [amount, 'paid', id]
+        );
+        
+        // Record payment history
+        await pool.query(
+            `INSERT INTO client_payments (client_id, amount, payment_method, recorded_by)
+             VALUES ($1, $2, $3, $4)`,
+            [id, amount, payment_method || 'cash', req.user.id]
+        );
+        
+        res.json({ success: true, message: 'Payment recorded successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 app.post('/api/admin/subscriptions/:businessId/payment', authenticate, async (req, res) => {
