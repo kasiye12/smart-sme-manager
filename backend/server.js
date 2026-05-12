@@ -3329,6 +3329,69 @@ app.get('/api/admin/dashboard', authenticate, async (req, res) => {
         });
     }
 });
+
+// ============================================
+// CLIENT PAYMENT RECORDING
+// ============================================
+app.post('/api/admin/clients/:id/payment', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, payment_method } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount required' });
+        }
+        
+        // Insert payment
+        await pool.query(
+            `INSERT INTO client_payments (client_id, amount, payment_method, recorded_by)
+             VALUES ($1, $2, $3, $4)`,
+            [id, amount, payment_method || 'cash', req.user.id]
+        );
+        
+        // Update client total
+        await pool.query(
+            'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
+            [amount, 'paid', id]
+        );
+        
+        res.json({ success: true, message: 'Payment recorded successfully' });
+    } catch (error) {
+        console.error('Payment error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// CLIENT ACTIVATE / DEACTIVATE
+// ============================================
+app.put('/api/admin/clients/:id/toggle-status', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Get current status
+        const client = await pool.query('SELECT is_active FROM clients WHERE id = $1', [id]);
+        if (client.rows.length === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        const newStatus = !client.rows[0].is_active;
+        
+        await pool.query(
+            'UPDATE clients SET is_active = $1, updated_at = NOW() WHERE id = $2',
+            [newStatus, id]
+        );
+        
+        res.json({ 
+            success: true, 
+            is_active: newStatus,
+            message: newStatus ? 'Client activated' : 'Client deactivated' 
+        });
+    } catch (error) {
+        console.error('Toggle error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
