@@ -1922,6 +1922,18 @@ app.get('/api/z-report/status', authenticate, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// GET ALL USERS
+app.get('/api/users', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, full_name, phone, role, is_active, pin_code, created_at FROM users WHERE business_id = $1 ORDER BY created_at',
+            [req.user.business_id]
+        );
+        res.json({ users: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 app.post('/api/users', authenticate, async (req, res) => {
     try {
