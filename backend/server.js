@@ -3,15 +3,15 @@ const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const fetch = require('node-fetch');
-const Sentry = require('@sentry/node');
+//const Sentry = require('@sentry/node');
 
 // ✅ 1. Initialize Sentry FIRST - before creating the app
-Sentry.init({ dsn: process.env.SENTRY_DSN });
+// Sentry.init({ dsn: process.env.SENTRY_DSN });
 
 const app = express();
 
 // ✅ 2. Sentry request handler - after app, before routes
-app.use(Sentry.Handlers.requestHandler());
+//app.use(Sentry.Handlers.requestHandler());
 
 // Telegram Bot Configuration
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -3213,7 +3213,7 @@ app.get('/api/admin/dashboard', authenticate, async (req, res) => {
 
 
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
-app.use(Sentry.Handlers.errorHandler());
+//app.use(Sentry.Handlers.errorHandler());
 // ============================================
 // START SERVER
 // ============================================
