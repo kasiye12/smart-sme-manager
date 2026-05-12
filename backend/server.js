@@ -3211,7 +3211,33 @@ app.get('/api/admin/dashboard', authenticate, async (req, res) => {
     } catch (error) { res.json({ total_clients: 0 }); }
 });
 
+// ============================================
+// ADMIN PANEL APIs (SIMPLE WORKING VERSION)
+// ============================================
+app.get('/api/admin/clients', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
+        res.json({ clients: result.rows });
+    } catch (error) {
+        res.json({ clients: [] });
+    }
+});
 
+app.post('/api/admin/clients', async (req, res) => {
+    try {
+        const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
+        if (!business_name || !owner_name || !phone) {
+            return res.status(400).json({ error: 'All fields required' });
+        }
+        const result = await pool.query(
+            'INSERT INTO clients (business_name, owner_name, phone, subscription_plan, monthly_fee) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+            [business_name, owner_name, phone, subscription_plan || 'trial', monthly_fee || 0]
+        );
+        res.status(201).json({ success: true, client: result.rows[0] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
