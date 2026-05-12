@@ -3396,6 +3396,298 @@ app.get('/api/announcements', authenticate, async (req, res) => {
         res.json({ message: null });
     }
 });
+
+// ============================================
+// ADMIN CLIENT MANAGEMENT WITH PAYMENT TRACKING
+// ============================================
+
+// Get all clients with payment status
+app.get('/api/admin/clients', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                b.id,
+                b.name as business_name,
+                b.owner_name,
+                b.phone,
+                b.email,
+                b.city,
+                b.subscription_plan,
+                b.monthly_fee,
+                b.is_active,
+                b.created_at,
+                b.subscription_end_date,
+                COALESCE(SUM(p.amount), 0) as total_paid,
+                CASE 
+                    WHEN b.subscription_end_date < NOW() THEN 'expired'
+                    WHEN b.is_active = false THEN 'deactivated'
+                    WHEN COALESCE(SUM(p.amount), 0) >= b.monthly_fee THEN 'paid'
+                    ELSE 'unpaid'
+                END as payment_status,
+                CASE 
+                    WHEN b.subscription_end_date < NOW() THEN 0
+                    ELSE b.monthly_fee - COALESCE(SUM(p.amount), 0)
+                END as remaining_balance
+            FROM businesses b
+            LEFT JOIN subscription_payments p ON b.id = p.business_id
+            GROUP BY b.id
+            ORDER BY b.created_at DESC
+        `);
+        
+        res.json({ clients: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get single client details with payment history
+app.get('/api/admin/clients/:id', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const client = await pool.query(`
+            SELECT 
+                b.*,
+                COALESCE(SUM(p.amount), 0) as total_paid,
+                COUNT(p.id) as payment_count,
+                MAX(p.created_at) as last_payment_date
+            FROM businesses b
+            LEFT JOIN subscription_payments p ON b.id = p.business_id
+            WHERE b.id = $1
+            GROUP BY b.id
+        `, [id]);
+        
+        const payments = await pool.query(`
+            SELECT * FROM subscription_payments 
+            WHERE business_id = $1 
+            ORDER BY created_at DESC
+        `, [id]);
+        
+        res.json({ 
+            client: client.rows[0],
+            payments: payments.rows
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add new client (business)
+app.post('/api/admin/clients', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee } = req.body;
+        
+        // Check if business already exists
+        const existing = await client.query(
+            'SELECT id FROM businesses WHERE phone = $1 OR name = $2',
+            [phone, business_name]
+        );
+        
+        if (existing.rows.length > 0) {
+            return res.status(400).json({ error: 'Business with this phone or name already exists' });
+        }
+        
+        // Calculate subscription end date (30 days from now for trial, or based on payment)
+        const subscriptionEndDate = new Date();
+        subscriptionEndDate.setDate(subscriptionEndDate.getDate() + 30);
+        
+        const result = await client.query(`
+            INSERT INTO businesses (
+                name, owner_name, phone, email, city, 
+                subscription_plan, monthly_fee, subscription_end_date, is_active
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+            RETURNING id
+        `, [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, subscriptionEndDate]);
+        
+        // Create default admin user for the business
+        const defaultPassword = await bcrypt.hash('12345678', 10);
+        await client.query(`
+            INSERT INTO users (business_id, full_name, phone, password_hash, role, is_active)
+            VALUES ($1, $2, $3, $4, 'owner', true)
+        `, [result.rows[0].id, owner_name, phone, defaultPassword]);
+        
+        await client.query('COMMIT');
+        
+        res.status(201).json({ 
+            success: true, 
+            message: 'Client added successfully',
+            client_id: result.rows[0].id
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Update client
+app.put('/api/admin/clients/:id', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active } = req.body;
+        
+        const result = await pool.query(`
+            UPDATE businesses SET
+                name = COALESCE($1, name),
+                owner_name = COALESCE($2, owner_name),
+                phone = COALESCE($3, phone),
+                email = COALESCE($4, email),
+                city = COALESCE($5, city),
+                subscription_plan = COALESCE($6, subscription_plan),
+                monthly_fee = COALESCE($7, monthly_fee),
+                is_active = COALESCE($8, is_active),
+                updated_at = NOW()
+            WHERE id = $9
+            RETURNING *
+        `, [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, id]);
+        
+        res.json({ success: true, client: result.rows[0] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Record subscription payment
+app.post('/api/admin/clients/:id/payment', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { id } = req.params;
+        const { amount, payment_method, notes } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount required' });
+        }
+        
+        // Get current business info
+        const business = await client.query(
+            'SELECT monthly_fee, subscription_end_date, name FROM businesses WHERE id = $1',
+            [id]
+        );
+        
+        if (business.rows.length === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        // Record payment
+        await client.query(`
+            INSERT INTO subscription_payments (
+                business_id, amount, payment_method, notes, created_by, created_at
+            ) VALUES ($1, $2, $3, $4, $5, NOW())
+        `, [id, amount, payment_method || 'cash', notes || null, req.user.id]);
+        
+        // Calculate new subscription end date
+        const currentEndDate = new Date(business.rows[0].subscriptscription_end_date || new Date());
+        const monthlyFee = parseFloat(business.rows[0].monthly_fee);
+        const paidAmount = parseFloat(amount);
+        
+        // Extend subscription by number of months paid
+        const monthsPaid = Math.floor(paidAmount / monthlyFee);
+        if (monthsPaid > 0) {
+            currentEndDate.setMonth(currentEndDate.getMonth() + monthsPaid);
+            await client.query(`
+                UPDATE businesses 
+                SET subscription_end_date = $1, is_active = true, updated_at = NOW()
+                WHERE id = $2
+            `, [currentEndDate, id]);
+        }
+        
+        // Log action
+        await client.query(`
+            INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
+            VALUES ($1, $2, 'payment', 'subscription', $3, $4)
+        `, [id, req.user.id, id, JSON.stringify({ amount, months_paid: monthsPaid })]);
+        
+        await client.query('COMMIT');
+        
+        res.json({ 
+            success: true, 
+            message: `Payment of ${amount} ETB recorded successfully`,
+            subscription_end_date: currentEndDate
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Toggle client status (activate/deactivate)
+app.put('/api/admin/clients/:id/toggle-status', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const business = await pool.query('SELECT is_active FROM businesses WHERE id = $1', [id]);
+        if (business.rows.length === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        const newStatus = !business.rows[0].is_active;
+        await pool.query('UPDATE businesses SET is_active = $1, updated_at = NOW() WHERE id = $2', [newStatus, id]);
+        
+        res.json({ 
+            success: true, 
+            is_active: newStatus,
+            message: newStatus ? 'Client activated' : 'Client deactivated'
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get payment summary/dashboard
+app.get('/api/admin/payment-summary', authenticate, authorize('admin', 'owner'), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                COUNT(*) as total_clients,
+                SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END) as active_clients,
+                SUM(CASE WHEN is_active = false THEN 1 ELSE 0 END) as inactive_clients,
+                SUM(CASE 
+                    WHEN subscription_end_date < NOW() THEN 1 
+                    ELSE 0 
+                END) as expired_clients,
+                COALESCE(SUM(monthly_fee), 0) as potential_monthly_revenue,
+                COALESCE((
+                    SELECT SUM(amount) FROM subscription_payments 
+                    WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM NOW())
+                    AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM NOW())
+                ), 0) as current_month_collections,
+                COALESCE((
+                    SELECT SUM(amount) FROM subscription_payments 
+                    WHERE EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM NOW())
+                ), 0) as yearly_collections
+            FROM businesses
+        `);
+        
+        const unpaidClients = await pool.query(`
+            SELECT 
+                b.id, b.name, b.owner_name, b.phone, b.monthly_fee,
+                b.subscription_end_date,
+                COALESCE(SUM(p.amount), 0) as total_paid,
+                b.monthly_fee - COALESCE(SUM(p.amount), 0) as due_amount
+            FROM businesses b
+            LEFT JOIN subscription_payments p ON b.id = p.business_id
+            WHERE b.is_active = true 
+                AND (b.subscription_end_date < NOW() OR COALESCE(SUM(p.amount), 0) < b.monthly_fee)
+            GROUP BY b.id
+            HAVING b.monthly_fee - COALESCE(SUM(p.amount), 0) > 0
+        `);
+        
+        res.json({ 
+            summary: result.rows[0],
+            unpaid_clients: unpaidClients.rows
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
