@@ -62,37 +62,61 @@ app.get('/', (req, res) => {
 // ============================================
 // HELPER: Get Ethiopian Date
 // ============================================
+// ============================================
+// HELPER: Get Ethiopian Date (FIXED)
+// ============================================
 function getEthiopianDate() {
     const now = new Date();
     const year = now.getFullYear();
-    const month = now.getMonth() + 1;
+    const month = now.getMonth() + 1; // JavaScript months are 0-indexed
     const day = now.getDate();
     
     let ethYear, ethMonth, ethDay;
     
+    // Ethiopian New Year is September 11 (or 12 in leap years)
     if (month > 9 || (month === 9 && day >= 11)) {
-        ethYear = year + 7;
-        ethMonth = month - 9;
-        ethDay = day - 10;
+        // After Ethiopian New Year
+        ethYear = year + 7; // Ethiopian year is 7-8 years behind Gregorian
+        ethMonth = month - 8; // September becomes month 1, October month 2, etc.
+        ethDay = day - 10; // Adjust for New Year offset
     } else {
+        // Before Ethiopian New Year
         ethYear = year + 8;
-        ethMonth = month + 3;
+        ethMonth = month + 4; // January becomes month 5, February month 6, etc.
         ethDay = day;
     }
     
-    if (ethMonth > 12) ethMonth = 13;
+    // Handle day underflow for early September
+    if (ethDay <= 0) {
+        ethMonth--;
+        if (ethMonth <= 0) {
+            ethMonth = 13; // Pagume
+            ethYear--;
+        }
+        // Add days from previous month (all Ethiopian months have 30 days)
+        ethDay = 30 + ethDay;
+    }
+    
+    // Ensure months don't exceed 13
+    if (ethMonth > 13) {
+        ethMonth -= 13;
+        ethYear++;
+    }
     
     const ethMonths = ['Meskerem', 'Tikimt', 'Hidar', 'Tahsas', 'Tir', 'Yekatit', 'Megabit', 'Miazia', 'Ginbot', 'Sene', 'Hamle', 'Nehase', 'Pagume'];
     const ethMonthsAm = ['መስከረም', 'ጥቅምት', 'ህዳር', 'ታህሳስ', 'ጥር', 'የካቲት', 'መጋቢት', 'ሚያዚያ', 'ግንቦት', 'ሰኔ', 'ሐምሌ', 'ነሐሴ', 'ጳጉሜ'];
     
+    // Clamp month index to valid range
+    const monthIndex = Math.max(0, Math.min(12, ethMonth - 1));
+    
     return {
-        en: `${ethDay} ${ethMonths[ethMonth - 1]} ${ethYear}`,
-        am: `${ethDay} ${ethMonthsAm[ethMonth - 1]} ${ethYear}`,
+        en: `${ethDay} ${ethMonths[monthIndex]} ${ethYear}`,
+        am: `${ethDay} ${ethMonthsAm[monthIndex]} ${ethYear}`,
         day: ethDay,
         month: ethMonth,
         year: ethYear,
-        monthNameEn: ethMonths[ethMonth - 1],
-        monthNameAm: ethMonthsAm[ethMonth - 1]
+        monthNameEn: ethMonths[monthIndex],
+        monthNameAm: ethMonthsAm[monthIndex]
     };
 }
 
@@ -157,9 +181,16 @@ app.post('/api/auth/register', async (req, res) => {
         
         const userResult = await pool.query(
             'INSERT INTO users (business_id, full_name, phone, password_hash, role) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [businessId, owner_name, phone, hashedPassword, 'owner']
+            [businessId, owner_name, phone, hashedPassword, 'manager']
         );
-        
+        try {
+    await pool.query(
+        'INSERT INTO clients (business_name, owner_name, phone, subscription_plan) VALUES ($1, $2, $3, $4) ON CONFLICT (phone) DO NOTHING',
+        [business_name, owner_name, phone, 'trial']
+    );
+} catch (e) {
+    console.log('Client sync:', e.message);
+}
         const token = jwt.sign(
             { id: userResult.rows[0].id, business_id: businessId, role: 'owner' },
             process.env.JWT_SECRET || 'my-super-secret-key-2026',
@@ -3258,16 +3289,19 @@ app.put('/api/admin/clients/:id', authenticate, async (req, res) => {
     }
 });
 
+// ============================================
+// CLIENT PAYMENT RECORDING (ONLY ONE INSTANCE NEEDED)
+// ============================================
 app.post('/api/admin/clients/:id/payment', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
         const { amount, payment_method } = req.body;
         
         if (!amount || amount <= 0) {
-            return res.status(400).json({ error: 'Valid amount is required' });
+            return res.status(400).json({ error: 'Valid amount required' });
         }
         
-        // Insert payment WITHOUT receipt_number
+        // Insert payment
         await pool.query(
             `INSERT INTO client_payments (client_id, amount, payment_method, recorded_by)
              VALUES ($1, $2, $3, $4)`,
