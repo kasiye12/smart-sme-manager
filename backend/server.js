@@ -3445,6 +3445,85 @@ app.post('/api/admin/subscriptions/:businessId/payment', authenticate, async (re
         res.json({ success: true, message: 'Payment recorded' });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
+
+// ============================================
+// SUBSCRIPTION STATUS CHECK
+// ============================================
+app.get('/api/subscription/check', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT 
+                subscription_plan, monthly_fee, 
+                subscription_end_date, payment_due_date,
+                (SELECT COALESCE(SUM(amount), 0) FROM subscription_payments WHERE business_id = $1) as total_paid
+             FROM businesses WHERE id = $1`,
+            [req.user.business_id]
+        );
+        
+        const biz = result.rows[0];
+        const now = new Date();
+        const dueDate = biz.payment_due_date ? new Date(biz.payment_due_date) : null;
+        const endDate = biz.subscription_end_date ? new Date(biz.subscription_end_date) : null;
+        
+        let status = 'active';
+        let message = null;
+        let color = 'green';
+        let is_locked = false;
+        let days_remaining = null;
+        
+        if (biz.subscription_plan === 'trial' || biz.subscription_plan === 'free') {
+            status = 'trial';
+        } else if (dueDate) {
+            days_remaining = Math.ceil((dueDate - now) / (1000 * 60 * 60 * 24));
+            
+            if (days_remaining <= 0) {
+                // Past due - check grace period
+                const graceDays = Math.abs(days_remaining);
+                if (graceDays <= 3) {
+                    status = 'grace';
+                    message = `⚠️ Payment overdue by ${graceDays} day(s). Please renew to continue.`;
+                    color = 'orange';
+                    is_locked = false;
+                } else {
+                    status = 'locked';
+                    message = '🔒 Account locked. Please contact admin to reactivate.';
+                    color = 'red';
+                    is_locked = true;
+                }
+            } else if (days_remaining <= 7) {
+                status = 'warning';
+                message = `⚠️ ${days_remaining} day(s) remaining. Please renew soon.`;
+                color = 'yellow';
+            }
+        } else if (endDate && endDate < now) {
+            status = 'expired';
+            message = '🔒 Subscription expired. Please renew.';
+            color = 'red';
+            is_locked = true;
+        }
+        
+        res.json({
+            ...biz,
+            status: status,
+            message: message,
+            color: color,
+            is_locked: is_locked,
+            days_remaining: days_remaining,
+            grace_period: status === 'grace' ? 3 - Math.abs(days_remaining) : 0
+        });
+    } catch (error) {
+        res.json({ status: 'active', is_locked: false, message: null });
+    }
+});
+app.put('/api/admin/subscriptions/:businessId/unlock', authenticate, async (req, res) => {
+    try {
+        await pool.query(
+            `UPDATE businesses SET payment_due_date = CURRENT_DATE + INTERVAL '30 days', subscription_end_date = CURRENT_DATE + INTERVAL '30 days', updated_at = NOW() WHERE id = $1`,
+            [req.params.businessId]
+        );
+        res.json({ success: true, message: 'Account unlocked for 30 days' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 //app.use(Sentry.Handlers.errorHandler());
 // ============================================
