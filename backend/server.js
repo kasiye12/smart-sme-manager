@@ -3438,6 +3438,58 @@ app.put('/api/admin/tickets/:id', authenticate, authorize('owner', 'admin'), asy
         res.json({ success: true, message: 'Ticket updated' });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
+// ============================================
+// ADMIN PANEL APIs
+// ============================================
+
+// Get admin dashboard stats
+app.get('/api/admin/dashboard', authenticate, async (req, res) => {
+    try {
+        if (!['owner', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        const result = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM businesses WHERE is_active = true) as total_clients,
+                (SELECT COALESCE(SUM(monthly_fee), 0) FROM clients WHERE is_active = true) as mrr,
+                (SELECT COUNT(*) FROM clients WHERE payment_status = 'pending') as pending_payments,
+                (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')) as open_tickets
+        `);
+        res.json(result.rows[0] || { total_clients: 0, mrr: 0, pending_payments: 0, open_tickets: 0 });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Get all clients
+app.get('/api/admin/clients', authenticate, async (req, res) => {
+    try {
+        if (!['owner', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        const result = await pool.query(
+            'SELECT * FROM clients ORDER BY created_at DESC'
+        );
+        res.json({ clients: result.rows });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Add client
+app.post('/api/admin/clients', authenticate, async (req, res) => {
+    try {
+        if (!['owner', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+        const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
+        if (!business_name || !owner_name || !phone) {
+            return res.status(400).json({ error: 'Business name, owner, and phone required' });
+        }
+        const result = await pool.query(
+            `INSERT INTO clients (business_name, owner_name, phone, subscription_plan, monthly_fee)
+             VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+            [business_name, owner_name, phone, subscription_plan || 'trial', monthly_fee || 0]
+        );
+        res.status(201).json({ success: true, client: result.rows[0] });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 app.use(Sentry.Handlers.errorHandler());
