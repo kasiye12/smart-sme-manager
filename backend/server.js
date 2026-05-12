@@ -3183,6 +3183,117 @@ app.get('/api/app-version', async (req, res) => {
     });
 });
 
+// ============================================
+// CLIENT MANAGEMENT (SUPER ADMIN)
+// ============================================
+
+// Get all clients
+app.get('/api/admin/clients', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT c.*, 
+                   (SELECT COUNT(*) FROM sales WHERE business_id = c.business_id) as total_sales,
+                   (SELECT COUNT(*) FROM customers WHERE business_id = c.business_id) as total_customers,
+                   (SELECT COUNT(*) FROM products WHERE business_id = c.business_id) as total_products
+            FROM clients c
+            ORDER BY c.created_at DESC
+        `);
+        res.json({ clients: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add new client
+app.post('/api/admin/clients', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee } = req.body;
+        
+        const result = await pool.query(
+            `INSERT INTO clients (business_name, owner_name, phone, email, city, subscription_plan, monthly_fee)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+            [business_name, owner_name, phone, email, city, subscription_plan || 'free', monthly_fee || 0]
+        );
+        
+        res.status(201).json({ success: true, client: result.rows[0] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update client
+app.put('/api/admin/clients/:id', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE clients SET 
+                business_name = COALESCE($1, business_name),
+                owner_name = COALESCE($2, owner_name),
+                phone = COALESCE($3, phone),
+                email = COALESCE($4, email),
+                city = COALESCE($5, city),
+                subscription_plan = COALESCE($6, subscription_plan),
+                monthly_fee = COALESCE($7, monthly_fee),
+                is_active = COALESCE($8, is_active),
+                notes = COALESCE($9, notes),
+                updated_at = NOW()
+             WHERE id = $10 RETURNING *`,
+            [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes, id]
+        );
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Client not found' });
+        res.json({ success: true, client: result.rows[0] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Record client payment
+app.post('/api/admin/clients/:id/payment', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, payment_method, reference_number, notes } = req.body;
+        
+        await pool.query(
+            `INSERT INTO client_payments (client_id, amount, payment_method, reference_number, notes)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, amount, payment_method, reference_number, notes]
+        );
+        
+        await pool.query(
+            'UPDATE clients SET total_paid = total_paid + $1, updated_at = NOW() WHERE id = $2',
+            [amount, id]
+        );
+        
+        res.json({ success: true, message: 'Payment recorded' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get client dashboard stats
+app.get('/api/admin/dashboard', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const totalClients = await pool.query('SELECT COUNT(*) FROM clients WHERE is_active = true');
+        const activeToday = await pool.query('SELECT COUNT(*) FROM clients WHERE last_login_date = CURRENT_DATE');
+        const monthlyRevenue = await pool.query('SELECT COALESCE(SUM(monthly_fee), 0) as total FROM clients WHERE is_active = true');
+        const pendingPayments = await pool.query('SELECT COUNT(*) FROM clients WHERE payment_status = $1', ['pending']);
+        const totalSales = await pool.query('SELECT COALESCE(SUM(total_amount), 0) as total FROM sales');
+        
+        res.json({
+            total_clients: parseInt(totalClients.rows[0].count),
+            active_today: parseInt(activeToday.rows[0].count),
+            monthly_revenue: parseFloat(monthlyRevenue.rows[0].total),
+            pending_payments: parseInt(pendingPayments.rows[0].count),
+            total_platform_sales: parseFloat(totalSales.rows[0].total)
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 app.use(Sentry.Handlers.errorHandler());
 // ============================================
