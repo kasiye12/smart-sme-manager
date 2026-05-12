@@ -3183,59 +3183,150 @@ app.get('/api/app-version', async (req, res) => {
     });
 });
 // ============================================
-// ADMIN PANEL APIs
+// CLIENT MANAGEMENT (SUPER ADMIN) - COMPLETE CLEAN VERSION
 // ============================================
-app.post('/api/admin/clients', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
-        res.json({ clients: result.rows });
-    } catch (error) { res.json({ clients: [] }); }
-});
 
-app.post('/api/admin/clients', async (req, res) => {
+// Get all clients
+app.get('/api/admin/clients', authenticate, async (req, res) => {
     try {
-        const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
-        if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'All fields required' });
         const result = await pool.query(
-            'INSERT INTO clients (business_name, owner_name, phone, subscription_plan, monthly_fee) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-            [business_name, owner_name, phone, subscription_plan || 'trial', monthly_fee || 0]
+            'SELECT * FROM clients ORDER BY created_at DESC'
         );
-        res.status(201).json({ success: true, client: result.rows[0] });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/admin/dashboard', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT (SELECT COUNT(*) FROM clients) as total_clients, 0 as mrr, 0 as pending_payments, 0 as open_tickets');
-        res.json(result.rows[0] || { total_clients: 0 });
-    } catch (error) { res.json({ total_clients: 0 }); }
-});
-
-// ============================================
-// ADMIN PANEL APIs (SIMPLE WORKING VERSION)
-// ============================================
-app.get('/api/admin/clients', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
         res.json({ clients: result.rows });
     } catch (error) {
-        res.json({ clients: [] });
+        console.error('Get clients error:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 
-app.post('/api/admin/clients', async (req, res) => {
+// Add new client
+app.post('/api/admin/clients', authenticate, async (req, res) => {
     try {
-        const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee } = req.body;
+        
         if (!business_name || !owner_name || !phone) {
-            return res.status(400).json({ error: 'All fields required' });
+            return res.status(400).json({ error: 'Business name, owner, and phone are required' });
         }
+        
         const result = await pool.query(
-            'INSERT INTO clients (business_name, owner_name, phone, subscription_plan, monthly_fee) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-            [business_name, owner_name, phone, subscription_plan || 'trial', monthly_fee || 0]
+            `INSERT INTO clients (business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, subscription_start)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE) RETURNING *`,
+            [business_name, owner_name, phone, email || null, city || null, subscription_plan || 'trial', monthly_fee || 0]
         );
-        res.status(201).json({ success: true, client: result.rows[0] });
+        
+        res.status(201).json({ success: true, client: result.rows[0], message: 'Client added successfully' });
     } catch (error) {
+        console.error('Add client error:', error);
+        if (error.code === '23505') {
+            return res.status(400).json({ error: 'Phone number already registered' });
+        }
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Update client
+app.put('/api/admin/clients/:id', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes, payment_status } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE clients SET 
+                business_name = COALESCE($1, business_name),
+                owner_name = COALESCE($2, owner_name),
+                phone = COALESCE($3, phone),
+                email = COALESCE($4, email),
+                city = COALESCE($5, city),
+                subscription_plan = COALESCE($6, subscription_plan),
+                monthly_fee = COALESCE($7, monthly_fee),
+                is_active = COALESCE($8, is_active),
+                notes = COALESCE($9, notes),
+                payment_status = COALESCE($10, payment_status),
+                updated_at = NOW()
+             WHERE id = $11 RETURNING *`,
+            [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes, payment_status, id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Client not found' });
+        }
+        
+        res.json({ success: true, client: result.rows[0], message: 'Client updated successfully' });
+    } catch (error) {
+        console.error('Update client error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Record client payment
+app.post('/api/admin/clients/:id/payment', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { id } = req.params;
+        const { amount, payment_method, receipt_number, notes } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: 'Valid amount required' });
+        }
+        
+        // Insert payment record
+        await client.query(
+            `INSERT INTO client_payments (client_id, amount, payment_method, receipt_number, notes, recorded_by)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [id, amount, payment_method || 'cash', receipt_number || null, notes || null, req.user.id]
+        );
+        
+        // Update client total paid
+        await client.query(
+            'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
+            [amount, 'paid', id]
+        );
+        
+        await client.query('COMMIT');
+        
+        res.json({ success: true, message: 'Payment recorded successfully' });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Record payment error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Get admin dashboard stats
+app.get('/api/admin/dashboard', authenticate, async (req, res) => {
+    try {
+        const stats = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM clients WHERE is_active = true) as total_clients,
+                (SELECT COUNT(*) FROM clients WHERE created_at > NOW() - INTERVAL '30 days') as new_this_month,
+                (SELECT COALESCE(SUM(monthly_fee), 0) FROM clients WHERE is_active = true AND payment_status = 'paid') as mrr,
+                (SELECT COUNT(*) FROM clients WHERE payment_status = 'pending') as pending_payments,
+                (SELECT COALESCE(SUM(amount), 0) FROM client_payments WHERE payment_date > NOW() - INTERVAL '30 days') as collected_this_month,
+                (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')) as open_tickets
+        `);
+        
+        res.json(stats.rows[0] || {
+            total_clients: 0,
+            new_this_month: 0,
+            mrr: 0,
+            pending_payments: 0,
+            collected_this_month: 0,
+            open_tickets: 0
+        });
+    } catch (error) {
+        console.error('Dashboard error:', error);
+        res.json({
+            total_clients: 0,
+            new_this_month: 0,
+            mrr: 0,
+            pending_payments: 0,
+            collected_this_month: 0,
+            open_tickets: 0
+        });
     }
 });
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
