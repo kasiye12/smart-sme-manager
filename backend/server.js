@@ -3,19 +3,25 @@ const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const fetch = require('node-fetch');
+const Sentry = require('@sentry/node');
 
-// Telegram Bot Configuration - Use environment variable
+// ✅ 1. Initialize Sentry FIRST - before creating the app
+Sentry.init({ dsn: process.env.SENTRY_DSN });
+
+const app = express();
+
+// ✅ 2. Sentry request handler - after app, before routes
+app.use(Sentry.Handlers.requestHandler());
+
+// Telegram Bot Configuration
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-const app = express();
 
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
 const META_API_VERSION = 'v18.0';
 
-// ============================================
-// CORS - FIXES FLUTTER CONNECTION ERROR
-// ============================================
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -406,7 +412,6 @@ app.delete('/api/products/:id', authenticate, authorize('owner', 'manager'), asy
 // ============================================
 // CUSTOMERS
 // ============================================
-// POST /api/customers - Add Customer
 app.post('/api/customers', authenticate, async (req, res) => {
   try {
     const { 
@@ -433,7 +438,6 @@ app.post('/api/customers', authenticate, async (req, res) => {
   }
 });
 
-// PUT /api/customers/:id - Update Customer
 app.put('/api/customers/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -472,7 +476,6 @@ app.put('/api/customers/:id', authenticate, authorize('owner', 'manager'), async
   }
 });
 
-// GET /api/customers - Get Customers (with all fields)
 app.get('/api/customers', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
@@ -504,7 +507,6 @@ app.delete('/api/customers/:id', authenticate, authorize('owner', 'manager'), as
     }
 });
 
-// Customer payments
 app.post('/api/customers/:id/payment', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
@@ -541,7 +543,7 @@ app.get('/api/customers/:id/history', authenticate, async (req, res) => {
 });
 
 // ============================================
-// SALES (UPDATED with Tax Rate and Guarantor)
+// SALES
 // ============================================
 app.post('/api/sales', authenticate, async (req, res) => {
     const client = await pool.connect();
@@ -553,7 +555,6 @@ app.post('/api/sales', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'No items in sale' });
         }
         
-        // Get business tax settings
         const businessResult = await client.query(
             'SELECT tax_type, tax_rate, tin_number, show_tax_on_receipt, name FROM businesses WHERE id = $1',
             [req.user.business_id]
@@ -562,7 +563,6 @@ app.post('/api/sales', authenticate, async (req, res) => {
         const taxType = business?.tax_type || 'none';
         const businessTaxRate = business?.tax_rate || 0;
         
-        // Use provided tax_rate or business default
         const effectiveTaxRate = tax_rate !== undefined ? tax_rate : businessTaxRate;
         
         let subtotal = 0;
@@ -589,7 +589,6 @@ app.post('/api/sales', authenticate, async (req, res) => {
             });
         }
         
-        // Calculate tax
         let taxAmount = reqTaxAmount !== undefined ? reqTaxAmount : 0;
         if (reqTaxAmount === undefined) {
             switch (taxType) {
@@ -625,7 +624,6 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
             await client.query('UPDATE products SET current_stock = current_stock - $1, updated_at = NOW() WHERE id = $2', [item.quantity, item.product_id]);
             
-            // Record stock transaction
             await client.query(
                 `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
                  VALUES ($1, $2, $3, 'sale', $4, $5)`,
@@ -652,7 +650,6 @@ app.post('/api/sales', authenticate, async (req, res) => {
             );
         }
         
-        // Record action log
         await client.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'sale', 'sale', $3, $4)`,
@@ -738,7 +735,7 @@ app.post('/api/sales/:id/void', authenticate, authorize('owner', 'manager'), asy
 });
 
 // ============================================
-// COMPLETE DAILY REPORT WITH PAYMENT BREAKDOWN
+// REPORTS
 // ============================================
 app.get('/api/reports/daily', authenticate, async (req, res) => {
     try {
@@ -746,7 +743,6 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
         
         console.log(`Generating daily report for: ${today}, business: ${req.user.business_id}`);
         
-        // Get sales summary
         const salesResult = await pool.query(`
             SELECT 
                 COUNT(*) as total_sales,
@@ -761,7 +757,6 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Calculate GROSS PROFIT
         const profitResult = await pool.query(`
             SELECT COALESCE(SUM(
                 (si.unit_price - COALESCE(p.cost_price, 0)) * si.quantity
@@ -774,14 +769,12 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Get expenses
         const expenseResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses 
             WHERE business_id = $1 AND expense_date = $2
         `, [req.user.business_id, today]);
         
-        // Get payment method breakdown - FIXED
         const paymentResult = await pool.query(`
             SELECT 
                 COALESCE(SUM(CASE WHEN LOWER(s.payment_method) = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
@@ -795,7 +788,6 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             AND s.status = 'completed'
         `, [req.user.business_id, today]);
         
-        // Get previous day for growth calculation
         const yesterday = new Date(new Date(today) - 86400000).toISOString().split('T')[0];
         const prevDayResult = await pool.query(`
             SELECT COALESCE(SUM(total_amount), 0) as prev_revenue
@@ -822,7 +814,6 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
             total_expenses: totalExpenses,
             net_profit: netProfit,
             revenue_growth: revenueGrowth,
-            // Payment breakdown - ensure these are included
             cash_sales: parseFloat(paymentResult.rows[0].cash_sales) || 0,
             electronic_sales: parseFloat(paymentResult.rows[0].electronic_sales) || 0,
             credit_sales: parseFloat(paymentResult.rows[0].credit_sales) || 0,
@@ -852,16 +843,12 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
     }
 });
 
-// ============================================
-// COMPLETE MONTHLY REPORT WITH PAYMENT BREAKDOWN
-// ============================================
 app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { month, year } = req.query;
         const targetMonth = month || new Date().getMonth() + 1;
         const targetYear = year || new Date().getFullYear();
         
-        // Calculate previous month
         let prevMonth = targetMonth - 1;
         let prevYear = targetYear;
         if (prevMonth === 0) {
@@ -869,7 +856,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             prevYear = targetYear - 1;
         }
         
-        // Get sales summary
         const salesResult = await pool.query(`
             SELECT 
                 COUNT(*) as total_sales,
@@ -885,7 +871,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND s.status = 'completed'
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        // Calculate GROSS PROFIT
         const profitResult = await pool.query(`
             SELECT COALESCE(SUM(
                 (si.unit_price - COALESCE(p.cost_price, 0)) * si.quantity
@@ -899,7 +884,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND s.status = 'completed'
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        // Get expenses
         const expenseResult = await pool.query(`
             SELECT COALESCE(SUM(amount), 0) as total_expenses
             FROM expenses
@@ -908,7 +892,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND EXTRACT(YEAR FROM expense_date) = $3
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        // Get payment method breakdown
         const paymentResult = await pool.query(`
             SELECT 
                 COALESCE(SUM(CASE WHEN LOWER(s.payment_method) = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
@@ -921,7 +904,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
             AND s.status = 'completed'
         `, [req.user.business_id, targetMonth, targetYear]);
         
-        // Get previous month revenue for growth
         const prevMonthResult = await pool.query(`
             SELECT COALESCE(SUM(total_amount), 0) as prev_revenue
             FROM sales
@@ -966,9 +948,6 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
     }
 });
 
-// ============================================
-// FIXED YEARLY REPORT
-// ============================================
 app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { year } = req.query;
@@ -1033,9 +1012,6 @@ app.get('/api/reports/yearly', authenticate, authorize('owner', 'manager'), asyn
     }
 });
 
-// ============================================
-// FIXED QUARTERLY REPORT
-// ============================================
 app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { quarter, year } = req.query;
@@ -1094,9 +1070,6 @@ app.get('/api/reports/quarterly', authenticate, authorize('owner', 'manager'), a
     }
 });
 
-// ============================================
-// FIXED CUSTOM REPORT
-// ============================================
 app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { from, to } = req.query;
@@ -1148,9 +1121,6 @@ app.get('/api/reports/custom', authenticate, authorize('owner', 'manager'), asyn
     }
 });
 
-// ============================================
-// FIXED SUMMARY REPORT (with profit)
-// ============================================
 app.get('/api/reports/summary', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1182,7 +1152,6 @@ app.get('/api/reports/summary', authenticate, async (req, res) => {
             FROM sales WHERE business_id = $1 AND status = 'completed'
         `, [req.user.business_id]);
         
-        // ADD TODAY'S PROFIT
         const todayProfit = await pool.query(`
             SELECT COALESCE(SUM(si.profit_amount), 0) as profit
             FROM sale_items si
@@ -1205,9 +1174,6 @@ app.get('/api/reports/summary', authenticate, async (req, res) => {
     }
 });
 
-// ============================================
-// DEBT AGING REPORT (CORRECT)
-// ============================================
 app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
     try {
         const result = await pool.query(`
@@ -1229,6 +1195,316 @@ app.get('/api/reports/debt-aging', authenticate, async (req, res) => {
         res.json({ success: true, data: result.rows });
     } catch (error) {
         console.error('Debt aging error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/reports/top-products', authenticate, async (req, res) => {
+    try {
+        const { period, date, month, year, quarter, from, to } = req.query;
+        
+        console.log(`Top products request - period: ${period}, date: ${date}, business: ${req.user.business_id}`);
+        
+        let dateCondition = '';
+        let params = [req.user.business_id];
+        let paramCount = 2;
+        
+        if (period === 'daily' && date) {
+            dateCondition = `AND s.sale_date = $${paramCount++}`;
+            params.push(date);
+        } else if (period === 'monthly' && month && year) {
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) = $${paramCount++} 
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
+            params.push(month, year);
+        } else if (period === 'quarterly' && quarter && year) {
+            const startMonth = (quarter - 1) * 3 + 1;
+            const endMonth = startMonth + 2;
+            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $${paramCount++} AND $${paramCount++}
+                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
+            params.push(startMonth, endMonth, year);
+        } else if (period === 'yearly' && year) {
+            dateCondition = `AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
+            params.push(year);
+        } else if (period === 'custom' && from && to) {
+            dateCondition = `AND s.sale_date BETWEEN $${paramCount++} AND $${paramCount++}`;
+            params.push(from, to);
+        } else {
+            const today = new Date().toISOString().split('T')[0];
+            dateCondition = `AND s.sale_date = $${paramCount++}`;
+            params.push(today);
+        }
+        
+        const totalRevenueQuery = await pool.query(`
+            SELECT COALESCE(SUM(s.total_amount), 1) as total_revenue
+            FROM sales s
+            WHERE s.business_id = $1 AND s.status = 'completed'
+            ${dateCondition}
+        `, params);
+        
+        const totalRevenue = parseFloat(totalRevenueQuery.rows[0]?.total_revenue || 1);
+        
+        const productsQuery = await pool.query(`
+            SELECT 
+                COALESCE(p.name_translations->>'en', 'Unknown') as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 AND s.status = 'completed'
+            ${dateCondition}
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 10
+        `, params);
+        
+        const products = productsQuery.rows.map(row => ({
+            product_name: row.product_name,
+            total_quantity: parseInt(row.total_quantity),
+            total_revenue: parseFloat(row.total_revenue),
+            percentage: (parseFloat(row.total_revenue) / totalRevenue) * 100
+        }));
+        
+        console.log(`Found ${products.length} top products, total revenue: ${totalRevenue}`);
+        
+        res.json({ products: products });
+        
+    } catch (error) {
+        console.error('Top products error:', error);
+        res.status(500).json({ error: error.message, products: [] });
+    }
+});
+
+app.get('/api/reports/advanced/daily', authenticate, async (req, res) => {
+    try {
+        const date = req.query.date || new Date().toISOString().split('T')[0];
+        const yesterday = new Date(new Date(date) - 86400000).toISOString().split('T')[0];
+        
+        const currentDayQuery = await pool.query(`
+            WITH sales_data AS (
+                SELECT 
+                    COALESCE(SUM(s.total_amount), 0) as total_revenue,
+                    COUNT(*) as total_sales,
+                    COUNT(DISTINCT s.customer_id) as unique_customers,
+                    COALESCE(SUM(CASE WHEN s.payment_method = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
+                    COALESCE(SUM(CASE WHEN s.payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN s.total_amount ELSE 0 END), 0) as digital_sales,
+                    COALESCE(SUM(CASE WHEN s.payment_status = 'credit' THEN s.total_amount ELSE 0 END), 0) as credit_sales,
+                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
+                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit,
+                    COALESCE(SUM(s.tax_amount), 0) as total_tax
+                FROM sales s
+                LEFT JOIN sale_items si ON s.id = si.sale_id
+                LEFT JOIN products p ON si.product_id = p.id
+                WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+                GROUP BY s.sale_date
+            ),
+            expenses_data AS (
+                SELECT COALESCE(SUM(amount), 0) as total_expenses
+                FROM expenses
+                WHERE business_id = $1 AND expense_date = $2
+            ),
+            previous_day AS (
+                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
+                       COUNT(*) as prev_sales
+                FROM sales
+                WHERE business_id = $1 AND sale_date = $3 AND status = 'completed'
+            ),
+            cashout_data AS (
+                SELECT opening_cash_balance, actual_cash_balance
+                FROM daily_cashouts
+                WHERE business_id = $1 AND cashout_date = $2
+                LIMIT 1
+            )
+            SELECT 
+                sd.*,
+                ed.total_expenses,
+                pd.prev_revenue,
+                pd.prev_sales,
+                sd.gross_profit - ed.total_expenses as net_profit,
+                cd.opening_cash_balance,
+                cd.actual_cash_balance,
+                CASE WHEN pd.prev_revenue > 0 THEN ((sd.total_revenue - pd.prev_revenue) / pd.prev_revenue) * 100 ELSE 0 END as revenue_growth,
+                CASE WHEN pd.prev_sales > 0 THEN ((sd.total_sales - pd.prev_sales) / pd.prev_sales) * 100 ELSE 0 END as sales_growth,
+                COALESCE(cd.opening_cash_balance, 0) + sd.cash_sales as expected_cash_balance,
+                CASE WHEN sd.total_revenue > 0 THEN (sd.gross_profit / sd.total_revenue) * 100 ELSE 0 END as gross_margin,
+                CASE WHEN sd.total_revenue > 0 THEN ((sd.gross_profit - ed.total_expenses) / sd.total_revenue) * 100 ELSE 0 END as net_margin
+            FROM sales_data sd
+            CROSS JOIN expenses_data ed
+            CROSS JOIN previous_day pd
+            LEFT JOIN cashout_data cd ON true
+        `, [req.user.business_id, date, yesterday]);
+        
+        const topProducts = await pool.query(`
+            SELECT 
+                p.name_translations->>'en' as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue,
+                (SUM(si.total_price) / (SELECT COALESCE(SUM(total_amount), 1) FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = 'completed')) * 100 as percentage
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 5
+        `, [req.user.business_id, date]);
+        
+        const result = currentDayQuery.rows[0] || {};
+        
+        res.json({
+            success: true,
+            period: { date: date },
+            summary: {
+                total_revenue: parseFloat(result.total_revenue || 0),
+                total_sales: parseInt(result.total_sales || 0),
+                unique_customers: parseInt(result.unique_customers || 0),
+                average_transaction: result.total_sales > 0 ? (result.total_revenue / result.total_sales) : 0,
+                total_tax: parseFloat(result.total_tax || 0)
+            },
+            profit: {
+                cogs: parseFloat(result.cogs || 0),
+                gross_profit: parseFloat(result.gross_profit || 0),
+                gross_margin: parseFloat(result.gross_margin || 0),
+                total_expenses: parseFloat(result.total_expenses || 0),
+                net_profit: parseFloat(result.net_profit || 0),
+                net_margin: parseFloat(result.net_margin || 0)
+            },
+            growth: {
+                revenue_growth: parseFloat(result.revenue_growth || 0),
+                sales_growth: parseFloat(result.sales_growth || 0),
+                previous_revenue: parseFloat(result.prev_revenue || 0),
+                previous_sales: parseInt(result.prev_sales || 0),
+                trend: result.revenue_growth > 0 ? 'up' : (result.revenue_growth < 0 ? 'down' : 'same')
+            },
+            payment_breakdown: {
+                cash: parseFloat(result.cash_sales || 0),
+                digital: parseFloat(result.digital_sales || 0),
+                credit: parseFloat(result.credit_sales || 0)
+            },
+            z_report: {
+                opening_cash: parseFloat(result.opening_cash_balance || 0),
+                cash_sales: parseFloat(result.cash_sales || 0),
+                expected_cash: parseFloat(result.expected_cash_balance || 0),
+                actual_cash: parseFloat(result.actual_cash_balance || null),
+                status: result.actual_cash_balance ? (result.actual_cash_balance >= result.expected_cash_balance ? 'balanced' : 'short') : 'pending'
+            },
+            top_products: topProducts.rows
+        });
+        
+    } catch (error) {
+        console.error('Daily report error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/reports/advanced/monthly', authenticate, async (req, res) => {
+    try {
+        const { month, year } = req.query;
+        const targetMonth = month || new Date().getMonth() + 1;
+        const targetYear = year || new Date().getFullYear();
+        
+        let prevMonth = targetMonth - 1;
+        let prevYear = targetYear;
+        if (prevMonth === 0) {
+            prevMonth = 12;
+            prevYear = targetYear - 1;
+        }
+        
+        const result = await pool.query(`
+            WITH current_month AS (
+                SELECT 
+                    COALESCE(SUM(s.total_amount), 0) as revenue,
+                    COUNT(*) as sales_count,
+                    COUNT(DISTINCT s.customer_id) as customers,
+                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
+                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit
+                FROM sales s
+                LEFT JOIN sale_items si ON s.id = si.sale_id
+                LEFT JOIN products p ON si.product_id = p.id
+                WHERE s.business_id = $1 
+                    AND EXTRACT(MONTH FROM s.sale_date) = $2 
+                    AND EXTRACT(YEAR FROM s.sale_date) = $3
+                    AND s.status = 'completed'
+            ),
+            current_expenses AS (
+                SELECT COALESCE(SUM(amount), 0) as expenses
+                FROM expenses
+                WHERE business_id = $1 
+                    AND EXTRACT(MONTH FROM expense_date) = $2 
+                    AND EXTRACT(YEAR FROM expense_date) = $3
+            ),
+            previous_month AS (
+                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
+                       COUNT(*) as prev_sales
+                FROM sales
+                WHERE business_id = $1 
+                    AND EXTRACT(MONTH FROM sale_date) = $4 
+                    AND EXTRACT(YEAR FROM sale_date) = $5
+                    AND status = 'completed'
+            )
+            SELECT 
+                cm.*,
+                ce.expenses,
+                pm.prev_revenue,
+                pm.prev_sales,
+                cm.gross_profit - ce.expenses as net_profit,
+                CASE WHEN pm.prev_revenue > 0 THEN ((cm.revenue - pm.prev_revenue) / pm.prev_revenue) * 100 ELSE 0 END as revenue_growth,
+                CASE WHEN pm.prev_sales > 0 THEN ((cm.sales_count - pm.prev_sales) / pm.prev_sales) * 100 ELSE 0 END as sales_growth,
+                CASE WHEN cm.revenue > 0 THEN (cm.gross_profit / cm.revenue) * 100 ELSE 0 END as gross_margin,
+                CASE WHEN cm.revenue > 0 THEN ((cm.gross_profit - ce.expenses) / cm.revenue) * 100 ELSE 0 END as net_margin
+            FROM current_month cm
+            CROSS JOIN current_expenses ce
+            CROSS JOIN previous_month pm
+        `, [req.user.business_id, targetMonth, targetYear, prevMonth, prevYear]);
+        
+        const topProducts = await pool.query(`
+            SELECT 
+                p.name_translations->>'en' as product_name,
+                COALESCE(SUM(si.quantity), 0) as total_quantity,
+                COALESCE(SUM(si.total_price), 0) as total_revenue
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            JOIN products p ON si.product_id = p.id
+            WHERE s.business_id = $1 
+                AND EXTRACT(MONTH FROM s.sale_date) = $2 
+                AND EXTRACT(YEAR FROM s.sale_date) = $3
+                AND s.status = 'completed'
+            GROUP BY p.id, p.name_translations
+            ORDER BY total_revenue DESC
+            LIMIT 5
+        `, [req.user.business_id, targetMonth, targetYear]);
+        
+        const row = result.rows[0] || {};
+        
+        res.json({
+            success: true,
+            period: { month: targetMonth, year: targetYear },
+            summary: {
+                total_revenue: parseFloat(row.revenue || 0),
+                total_sales: parseInt(row.sales_count || 0),
+                unique_customers: parseInt(row.customers || 0),
+                average_transaction: row.sales_count > 0 ? (row.revenue / row.sales_count) : 0
+            },
+            profit: {
+                cogs: parseFloat(row.cogs || 0),
+                gross_profit: parseFloat(row.gross_profit || 0),
+                gross_margin: parseFloat(row.gross_margin || 0),
+                total_expenses: parseFloat(row.expenses || 0),
+                net_profit: parseFloat(row.net_profit || 0),
+                net_margin: parseFloat(row.net_margin || 0)
+            },
+            growth: {
+                revenue_growth: parseFloat(row.revenue_growth || 0),
+                sales_growth: parseFloat(row.sales_growth || 0),
+                previous_revenue: parseFloat(row.prev_revenue || 0),
+                previous_sales: parseInt(row.prev_sales || 0),
+                trend: row.revenue_growth > 0 ? 'up' : (row.revenue_growth < 0 ? 'down' : 'same')
+            },
+            top_products: topProducts.rows
+        });
+        
+    } catch (error) {
+        console.error('Monthly report error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1264,6 +1540,28 @@ app.post('/api/expenses', authenticate, authorize('owner', 'manager'), async (re
     }
 });
 
+app.put('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { category, amount, description } = req.body;
+        const result = await pool.query(
+            'UPDATE expenses SET category = COALESCE($1, category), amount = COALESCE($2, amount), description = COALESCE($3, description), updated_at = NOW() WHERE id = $4 AND business_id = $5 RETURNING *',
+            [category, amount, description, id, req.user.business_id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
+        res.json({ success: true, expense: result.rows[0], message: 'Expense updated' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('DELETE FROM expenses WHERE id = $1 AND business_id = $2 RETURNING id', [id, req.user.business_id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
+        res.json({ success: true, message: 'Expense deleted' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 // ============================================
 // INVENTORY
 // ============================================
@@ -1285,7 +1583,6 @@ app.post('/api/inventory/adjust', authenticate, authorize('owner', 'manager'), a
             [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]
         );
         
-        // Record stock transaction
         await pool.query(
             `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
              VALUES ($1, $2, $3, 'adjustment', $4, $5)`,
@@ -1315,15 +1612,8 @@ app.get('/api/inventory/adjustments', authenticate, authorize('owner', 'manager'
 });
 
 // ============================================
-// DAILY CASH-OUT (Z-REPORT)
-// ============================================
-// Add these if not already present in your server.js
-
-// ============================================
 // CASH-OUT (Z-REPORT) ENDPOINTS
 // ============================================
-
-// Get cash-out status
 app.get('/api/cashout/status', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1342,7 +1632,6 @@ app.get('/api/cashout/status', authenticate, async (req, res) => {
     }
 });
 
-// Get cash-out summary
 app.get('/api/cashout/summary', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
@@ -1387,77 +1676,6 @@ app.get('/api/cashout/summary', authenticate, async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
-    }
-});
-
-// Close cash-out
-app.post('/api/cashout/close', authenticate, async (req, res) => {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        const { 
-            actual_cash_balance, notes, total_sales, total_cash_sales,
-            total_credit_sales, total_electronic_sales, total_tax, 
-            total_expenses, opening_cash_balance 
-        } = req.body;
-        
-        const today = new Date().toISOString().split('T')[0];
-        const expected_cash_balance = (opening_cash_balance || 0) + (total_cash_sales || 0) - (total_expenses || 0);
-        const cash_difference = actual_cash_balance - expected_cash_balance;
-        
-        const existing = await client.query(
-            'SELECT id FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2',
-            [req.user.business_id, today]
-        );
-        
-        let result;
-        if (existing.rows.length > 0) {
-            result = await client.query(`
-                UPDATE daily_cashouts SET
-                    total_sales = $1, total_cash_sales = $2, total_credit_sales = $3,
-                    total_electronic_sales = $4, total_tax = $5, total_expenses = $6,
-                    opening_cash_balance = $7, expected_cash_balance = $8,
-                    actual_cash_balance = $9, cash_difference = $10, notes = $11,
-                    is_closed = true, closed_at = NOW(), updated_at = NOW()
-                WHERE business_id = $12 AND cashout_date = $13
-                RETURNING *
-            `, [
-                total_sales, total_cash_sales, total_credit_sales, total_electronic_sales,
-                total_tax, total_expenses, opening_cash_balance, expected_cash_balance,
-                actual_cash_balance, cash_difference, notes, req.user.business_id, today
-            ]);
-        } else {
-            result = await client.query(`
-                INSERT INTO daily_cashouts (
-                    business_id, user_id, cashout_date, total_sales, total_cash_sales,
-                    total_credit_sales, total_electronic_sales, total_tax, total_expenses,
-                    opening_cash_balance, expected_cash_balance, actual_cash_balance,
-                    cash_difference, notes, is_closed, closed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, NOW())
-                RETURNING *
-            `, [
-                req.user.business_id, req.user.id, today, total_sales, total_cash_sales,
-                total_credit_sales, total_electronic_sales, total_tax, total_expenses,
-                opening_cash_balance, expected_cash_balance, actual_cash_balance,
-                cash_difference, notes
-            ]);
-        }
-        
-        await client.query('COMMIT');
-        
-        res.json({ 
-            success: true, 
-            message: 'Cash-out closed successfully',
-            cashout: result.rows[0],
-            difference: cash_difference
-        });
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Cashout close error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        client.release();
     }
 });
 
@@ -1565,11 +1783,118 @@ app.get('/api/cashout/history', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/z-report/close', authenticate, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { actual_cash_balance, notes } = req.body;
+        const today = new Date().toISOString().split('T')[0];
+        
+        const prevDay = new Date();
+        prevDay.setDate(prevDay.getDate() - 1);
+        const prevDayStr = prevDay.toISOString().split('T')[0];
+        
+        const prevCashout = await client.query(
+            'SELECT actual_cash_balance FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2 AND is_closed = true',
+            [req.user.business_id, prevDayStr]
+        );
+        
+        const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
+        
+        const cashSales = await client.query(
+            'SELECT COALESCE(SUM(total_amount), 0) as cash_total FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_method = \'cash\' AND status = \'completed\'',
+            [req.user.business_id, today]
+        );
+        
+        const cashExpenses = await client.query(
+            'SELECT COALESCE(SUM(amount), 0) as expense_total FROM expenses WHERE business_id = $1 AND expense_date = $2 AND payment_method = \'cash\'',
+            [req.user.business_id, today]
+        );
+        
+        const expectedCash = openingBalance + parseFloat(cashSales.rows[0].cash_total) - parseFloat(cashExpenses.rows[0].expense_total);
+        const difference = actual_cash_balance - expectedCash;
+        const status = difference === 0 ? 'exact' : (difference > 0 ? 'over' : 'short');
+        
+        const result = await client.query(
+            `INSERT INTO daily_cashouts (
+                business_id, user_id, cashout_date, opening_cash_balance, 
+                cash_sales, cash_expenses, expected_cash_balance, 
+                actual_cash_balance, cash_difference, status, notes, is_closed, closed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, NOW())
+            ON CONFLICT (business_id, cashout_date) 
+            DO UPDATE SET 
+                actual_cash_balance = $8,
+                cash_difference = $9,
+                status = $10,
+                notes = $11,
+                is_closed = true,
+                closed_at = NOW()
+            RETURNING *`,
+            [req.user.business_id, req.user.id, today, openingBalance, 
+             cashSales.rows[0].cash_total, cashExpenses.rows[0].expense_total,
+             expectedCash, actual_cash_balance, Math.abs(difference), status, notes]
+        );
+        
+        await client.query('COMMIT');
+        
+        const summary = {
+            date: today,
+            opening_balance: openingBalance,
+            cash_sales: parseFloat(cashSales.rows[0].cash_total),
+            cash_expenses: parseFloat(cashExpenses.rows[0].expense_total),
+            expected_cash: expectedCash,
+            actual_cash: actual_cash_balance,
+            difference: difference,
+            status: status
+        };
+        
+        res.json({ 
+            success: true, 
+            cashout: result.rows[0],
+            summary: summary,
+            message: status === 'short' 
+                ? `⚠️ Cash Shortage: ${Math.abs(difference)} ETB. Please check your records.` 
+                : status === 'over' 
+                    ? `✅ Cash Over: ${difference} ETB extra. Verify for errors.` 
+                    : '✅ Cash balanced perfectly! Z-Report closed.'
+        });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Z-Report error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+app.get('/api/z-report/status', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        
+        const result = await pool.query(
+            `SELECT * FROM daily_cashouts 
+             WHERE business_id = $1 AND cashout_date = $2`,
+            [req.user.business_id, today]
+        );
+        
+        const isClosed = result.rows.length > 0 && result.rows[0].is_closed === true;
+        
+        res.json({ 
+            is_closed: isClosed,
+            cashout: result.rows[0] || null,
+            message: isClosed ? 'Z-Report already closed for today' : 'Z-Report pending. Ready to close.'
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ============================================
 // USER MANAGEMENT ENDPOINTS
 // ============================================
-
-// Get all users for business
 app.get('/api/users', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
@@ -1582,7 +1907,6 @@ app.get('/api/users', authenticate, async (req, res) => {
     }
 });
 
-// Add new user
 app.post('/api/users', authenticate, authorize('owner'), async (req, res) => {
     try {
         const { full_name, phone, password, role, pin_code } = req.body;
@@ -1613,7 +1937,6 @@ app.post('/api/users', authenticate, authorize('owner'), async (req, res) => {
     }
 });
 
-// Update user
 app.put('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -1641,7 +1964,6 @@ app.put('/api/users/:id', authenticate, authorize('owner'), async (req, res) => 
     }
 });
 
-// Delete user (deactivate)
 app.delete('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -1665,7 +1987,6 @@ app.delete('/api/users/:id', authenticate, authorize('owner'), async (req, res) 
     }
 });
 
-// Reset user password
 app.post('/api/users/:id/reset-password', authenticate, authorize('owner'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -1693,7 +2014,129 @@ app.post('/api/users/:id/reset-password', authenticate, authorize('owner'), asyn
     }
 });
 
-// SMS Endpoint
+// ============================================
+// CASHIER PIN LOGIN
+// ============================================
+app.post('/api/auth/login-with-pin', async (req, res) => {
+    try {
+        const { pinCode } = req.body;
+        
+        if (!pinCode || pinCode.length < 4) {
+            return res.status(400).json({ error: 'Valid PIN code required' });
+        }
+        
+        const result = await pool.query(
+            `SELECT u.*, b.name as business_name, b.is_active as biz_active 
+             FROM users u 
+             JOIN businesses b ON u.business_id = b.id 
+             WHERE u.pin_code = $1 AND u.is_active = true AND u.role = 'cashier'`,
+            [pinCode]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid PIN code' });
+        }
+        
+        const user = result.rows[0];
+        if (!user.biz_active) {
+            return res.status(403).json({ error: 'Business account deactivated' });
+        }
+        
+        await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+        
+        const token = jwt.sign(
+            { id: user.id, business_id: user.business_id, role: user.role },
+            process.env.JWT_SECRET || 'my-super-secret-key-2026',
+            { expiresIn: '8h' }
+        );
+        
+        res.json({ 
+            success: true, 
+            token, 
+            user: { 
+                id: user.id, 
+                name: user.full_name, 
+                business_name: user.business_name, 
+                role: user.role,
+                is_cashier: true
+            } 
+        });
+        
+    } catch (error) {
+        console.error('PIN login error:', error);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/users/:id/set-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { pinCode } = req.body;
+        
+        if (!pinCode || pinCode.length < 4 || pinCode.length > 6) {
+            return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+        }
+        
+        const user = await pool.query(
+            'SELECT role FROM users WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (user.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        if (user.rows[0].role !== 'cashier') {
+            return res.status(400).json({ error: 'PIN only available for cashiers' });
+        }
+        
+        await pool.query(
+            'UPDATE users SET pin_code = $1, is_cashier = true, updated_at = NOW() WHERE id = $2',
+            [pinCode, id]
+        );
+        
+        res.json({ success: true, message: 'PIN code set successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.delete('/api/users/:id/remove-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        await pool.query(
+            'UPDATE users SET pin_code = NULL, updated_at = NOW() WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        res.json({ success: true, message: 'PIN code removed successfully' });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/users/:id/has-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await pool.query(
+            'SELECT pin_code IS NOT NULL as has_pin FROM users WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        res.json({ has_pin: result.rows[0]?.has_pin || false });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================
+// SMS & COMMUNICATION ENDPOINTS
+// ============================================
 app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
@@ -1719,8 +2162,6 @@ app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
 // ============================================
 // TELEGRAM BOT INTEGRATION
 // ============================================
-
-// Helper: Send message to Telegram user
 async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
     try {
         const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
@@ -1741,7 +2182,6 @@ async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
     }
 }
 
-// Helper: Send message with keyboard
 async function sendTelegramKeyboard(chatId, message, buttons, parseMode = 'HTML') {
     try {
         const keyboard = {
@@ -1766,19 +2206,16 @@ async function sendTelegramKeyboard(chatId, message, buttons, parseMode = 'HTML'
     }
 }
 
-// Telegram Webhook Endpoint
 app.post('/api/telegram-webhook', async (req, res) => {
     console.log('📨 Webhook received');
     
     try {
         const { message, callback_query } = req.body;
         
-        // Handle button clicks
         if (callback_query) {
             const chatId = callback_query.message.chat.id;
             const data = callback_query.data;
             
-            // Answer callback query
             await fetch(`${TELEGRAM_API_URL}/answerCallbackQuery`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1805,14 +2242,12 @@ app.post('/api/telegram-webhook', async (req, res) => {
             return res.sendStatus(200);
         }
         
-        // Handle text messages
         if (message && message.text) {
             const chatId = message.chat.id;
             const text = message.text;
             
             console.log(`📱 Message from ${chatId}: ${text}`);
             
-            // Handle /start command
             if (text.startsWith('/start')) {
                 const parts = text.split(' ');
                 let customerId = parts.length > 1 ? parts[1] : null;
@@ -1855,7 +2290,6 @@ Thank you for choosing us! 🙏
                     }
                 }
                 
-                // Generic welcome
                 await sendTelegramMessage(chatId, `
 🤖 <b>Smart SME Manager Bot</b>
 
@@ -1864,7 +2298,6 @@ Welcome! To connect your account, please ask the shop for your personalized link
 Type /help for available commands.
                 `);
             }
-            // Handle /balance command
             else if (text === '/balance') {
                 const customer = await pool.query(
                     'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
@@ -1890,7 +2323,6 @@ Please ask the shop to provide you with the Telegram connection link.
                     `);
                 }
             }
-            // Handle /help command
             else if (text === '/help') {
                 await sendTelegramMessage(chatId, `
 📖 <b>Available Commands</b>
@@ -1911,7 +2343,6 @@ Please ask the shop to provide you with the Telegram connection link.
     }
 });
 
-// Register customer Telegram ID manually
 app.post('/api/register-telegram', authenticate, async (req, res) => {
     try {
         const { customerId, telegramChatId } = req.body;
@@ -1959,9 +2390,6 @@ Thank you for choosing us! 🙏
     }
 });
 
-// ============================================
-// SEND TELEGRAM REMINDER - FIXED RESPONSE
-// ============================================
 app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
     console.log('📨 Send reminder request received');
     
@@ -1994,9 +2422,6 @@ Thank you for your business! 🙏
 📅 ${new Date().toLocaleString()}
         `;
         
-        const TELEGRAM_API_URL = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
-        
-        // Use HTTP module instead of fetch for better compatibility
         const https = require('https');
         const url = require('url');
         
@@ -2046,7 +2471,6 @@ Thank you for your business! 🙏
         console.log('Telegram API result:', result);
         
         if (result && result.ok === true) {
-            // Log success
             await pool.query(
                 `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
                  VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
@@ -2056,7 +2480,6 @@ Thank you for your business! 🙏
                 })]
             );
             
-            // Send proper success response
             return res.status(200).json({ 
                 success: true, 
                 message: 'Telegram reminder sent successfully',
@@ -2080,7 +2503,6 @@ Thank you for your business! 🙏
     }
 });
 
-// Test Telegram bot configuration
 app.get('/api/test-telegram', authenticate, async (req, res) => {
     try {
         const botInfo = await fetch(`${TELEGRAM_API_URL}/getMe`);
@@ -2100,7 +2522,6 @@ app.get('/api/test-telegram', authenticate, async (req, res) => {
     }
 });
 
-// Set webhook endpoint
 app.post('/api/set-telegram-webhook', authenticate, async (req, res) => {
     try {
         const webhookUrl = `${process.env.API_URL || 'https://smart-sme-api.onrender.com'}/api/telegram-webhook`;
@@ -2118,7 +2539,6 @@ app.post('/api/set-telegram-webhook', authenticate, async (req, res) => {
     }
 });
 
-// Delete webhook
 app.post('/api/delete-telegram-webhook', authenticate, async (req, res) => {
     try {
         const response = await fetch(`${TELEGRAM_API_URL}/deleteWebhook`, {
@@ -2133,513 +2553,10 @@ app.post('/api/delete-telegram-webhook', authenticate, async (req, res) => {
 });
 
 // ============================================
-// CASHIER PIN LOGIN
+// META WHATSAPP CLOUD API
 // ============================================
-
-// Login with PIN code
-app.post('/api/auth/login-with-pin', async (req, res) => {
-    try {
-        const { pinCode } = req.body;
-        
-        if (!pinCode || pinCode.length < 4) {
-            return res.status(400).json({ error: 'Valid PIN code required' });
-        }
-        
-        // Find user by PIN code
-        const result = await pool.query(
-            `SELECT u.*, b.name as business_name, b.is_active as biz_active 
-             FROM users u 
-             JOIN businesses b ON u.business_id = b.id 
-             WHERE u.pin_code = $1 AND u.is_active = true AND u.role = 'cashier'`,
-            [pinCode]
-        );
-        
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid PIN code' });
-        }
-        
-        const user = result.rows[0];
-        if (!user.biz_active) {
-            return res.status(403).json({ error: 'Business account deactivated' });
-        }
-        
-        // Update last login
-        await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
-        
-        // Generate token (cashier typically has limited access)
-        const token = jwt.sign(
-            { id: user.id, business_id: user.business_id, role: user.role },
-            process.env.JWT_SECRET || 'my-super-secret-key-2026',
-            { expiresIn: '8h' } // Shorter expiry for cashiers
-        );
-        
-        res.json({ 
-            success: true, 
-            token, 
-            user: { 
-                id: user.id, 
-                name: user.full_name, 
-                business_name: user.business_name, 
-                role: user.role,
-                is_cashier: true
-            } 
-        });
-        
-    } catch (error) {
-        console.error('PIN login error:', error);
-        res.status(500).json({ error: 'Login failed' });
-    }
-});
-
-// Set/Update Cashier PIN (Owner/Manager only)
-app.post('/api/users/:id/set-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { pinCode } = req.body;
-        
-        if (!pinCode || pinCode.length < 4 || pinCode.length > 6) {
-            return res.status(400).json({ error: 'PIN must be 4-6 digits' });
-        }
-        
-        // Verify user exists and is cashier
-        const user = await pool.query(
-            'SELECT role FROM users WHERE id = $1 AND business_id = $2',
-            [id, req.user.business_id]
-        );
-        
-        if (user.rows.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-        
-        if (user.rows[0].role !== 'cashier') {
-            return res.status(400).json({ error: 'PIN only available for cashiers' });
-        }
-        
-        // Update PIN
-        await pool.query(
-            'UPDATE users SET pin_code = $1, is_cashier = true, updated_at = NOW() WHERE id = $2',
-            [pinCode, id]
-        );
-        
-        res.json({ success: true, message: 'PIN code set successfully' });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Remove Cashier PIN
-app.delete('/api/users/:id/remove-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        await pool.query(
-            'UPDATE users SET pin_code = NULL, updated_at = NOW() WHERE id = $1 AND business_id = $2',
-            [id, req.user.business_id]
-        );
-        
-        res.json({ success: true, message: 'PIN code removed successfully' });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Check if user has PIN set
-app.get('/api/users/:id/has-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        const result = await pool.query(
-            'SELECT pin_code IS NOT NULL as has_pin FROM users WHERE id = $1 AND business_id = $2',
-            [id, req.user.business_id]
-        );
-        
-        res.json({ has_pin: result.rows[0]?.has_pin || false });
-        
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ============================================
-// FIXED TOP PRODUCTS ENDPOINT
-// ============================================
-app.get('/api/reports/top-products', authenticate, async (req, res) => {
-    try {
-        const { period, date, month, year, quarter, from, to } = req.query;
-        
-        console.log(`Top products request - period: ${period}, date: ${date}, business: ${req.user.business_id}`);
-        
-        let dateCondition = '';
-        let params = [req.user.business_id];
-        let paramCount = 2;
-        
-        if (period === 'daily' && date) {
-            dateCondition = `AND s.sale_date = $${paramCount++}`;
-            params.push(date);
-        } else if (period === 'monthly' && month && year) {
-            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) = $${paramCount++} 
-                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
-            params.push(month, year);
-        } else if (period === 'quarterly' && quarter && year) {
-            const startMonth = (quarter - 1) * 3 + 1;
-            const endMonth = startMonth + 2;
-            dateCondition = `AND EXTRACT(MONTH FROM s.sale_date) BETWEEN $${paramCount++} AND $${paramCount++}
-                            AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
-            params.push(startMonth, endMonth, year);
-        } else if (period === 'yearly' && year) {
-            dateCondition = `AND EXTRACT(YEAR FROM s.sale_date) = $${paramCount++}`;
-            params.push(year);
-        } else if (period === 'custom' && from && to) {
-            dateCondition = `AND s.sale_date BETWEEN $${paramCount++} AND $${paramCount++}`;
-            params.push(from, to);
-        } else {
-            // Default to today
-            const today = new Date().toISOString().split('T')[0];
-            dateCondition = `AND s.sale_date = $${paramCount++}`;
-            params.push(today);
-        }
-        
-        // Get total revenue for percentage calculation
-        const totalRevenueQuery = await pool.query(`
-            SELECT COALESCE(SUM(s.total_amount), 1) as total_revenue
-            FROM sales s
-            WHERE s.business_id = $1 AND s.status = 'completed'
-            ${dateCondition}
-        `, params);
-        
-        const totalRevenue = parseFloat(totalRevenueQuery.rows[0]?.total_revenue || 1);
-        
-        // Get top products
-        const productsQuery = await pool.query(`
-            SELECT 
-                COALESCE(p.name_translations->>'en', 'Unknown') as product_name,
-                COALESCE(SUM(si.quantity), 0) as total_quantity,
-                COALESCE(SUM(si.total_price), 0) as total_revenue
-            FROM sale_items si
-            JOIN sales s ON si.sale_id = s.id
-            JOIN products p ON si.product_id = p.id
-            WHERE s.business_id = $1 AND s.status = 'completed'
-            ${dateCondition}
-            GROUP BY p.id, p.name_translations
-            ORDER BY total_revenue DESC
-            LIMIT 10
-        `, params);
-        
-        const products = productsQuery.rows.map(row => ({
-            product_name: row.product_name,
-            total_quantity: parseInt(row.total_quantity),
-            total_revenue: parseFloat(row.total_revenue),
-            percentage: (parseFloat(row.total_revenue) / totalRevenue) * 100
-        }));
-        
-        console.log(`Found ${products.length} top products, total revenue: ${totalRevenue}`);
-        
-        res.json({ products: products });
-        
-    } catch (error) {
-        console.error('Top products error:', error);
-        res.status(500).json({ error: error.message, products: [] });
-    }
-});
-
-// ============================================
-// PHYSICAL COUNT RECONCILIATION
-// ============================================
-
-// Start a new physical count session
-app.post('/api/physical-count/start', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { notes } = req.body;
-        
-        // Check if there's an active count session
-        const activeSession = await pool.query(
-            `SELECT id FROM physical_count_sessions 
-             WHERE business_id = $1 AND status = 'in_progress'`,
-            [req.user.business_id]
-        );
-        
-        if (activeSession.rows.length > 0) {
-            return res.status(400).json({ 
-                error: 'There is already an active physical count session. Please complete or cancel it first.' 
-            });
-        }
-        
-        const result = await pool.query(
-            `INSERT INTO physical_count_sessions (business_id, user_id, status, notes, started_at)
-             VALUES ($1, $2, 'in_progress', $3, NOW())
-             RETURNING id, session_number`,
-            [req.user.business_id, req.user.id, notes]
-        );
-        
-        // Generate session number
-        const sessionNumber = `PC-${DateTime.now().getFullYear()}${(DateTime.now().getMonth() + 1).toString().padStart(2, '0')}${result.rows[0].id.toString().substring(0, 8)}`;
-        
-        await pool.query(
-            'UPDATE physical_count_sessions SET session_number = $1 WHERE id = $2',
-            [sessionNumber, result.rows[0].id]
-        );
-        
-        res.json({ 
-            success: true, 
-            session_id: result.rows[0].id,
-            session_number: sessionNumber
-        });
-        
-    } catch (error) {
-        console.error('Start physical count error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Save physical count for a product
-app.post('/api/physical-count/save-count', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { session_id, product_id, system_stock, physical_stock, counted_by } = req.body;
-        
-        // Check if session exists and is active
-        const session = await pool.query(
-            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
-            [session_id, req.user.business_id]
-        );
-        
-        if (session.rows.length === 0) {
-            return res.status(404).json({ error: 'Session not found' });
-        }
-        
-        if (session.rows[0].status !== 'in_progress') {
-            return res.status(400).json({ error: 'Session is already completed or cancelled' });
-        }
-        
-        // Check if product already counted in this session
-        const existing = await pool.query(
-            `SELECT id FROM physical_count_items 
-             WHERE session_id = $1 AND product_id = $2`,
-            [session_id, product_id]
-        );
-        
-        if (existing.rows.length > 0) {
-            // Update existing count
-            await pool.query(
-                `UPDATE physical_count_items 
-                 SET physical_stock = $1, counted_at = NOW(), counted_by = $2
-                 WHERE session_id = $3 AND product_id = $4`,
-                [physical_stock, counted_by || req.user.id, session_id, product_id]
-            );
-        } else {
-            // Insert new count
-            await pool.query(
-                `INSERT INTO physical_count_items 
-                 (session_id, product_id, system_stock, physical_stock, counted_by, counted_at)
-                 VALUES ($1, $2, $3, $4, $5, NOW())`,
-                [session_id, product_id, system_stock, physical_stock, counted_by || req.user.id]
-            );
-        }
-        
-        res.json({ success: true, message: 'Count saved successfully' });
-        
-    } catch (error) {
-        console.error('Save physical count error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Complete physical count and apply adjustments
-app.post('/api/physical-count/complete', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        const { session_id, apply_adjustments = true } = req.body;
-        
-        // Get session details
-        const session = await client.query(
-            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
-            [session_id, req.user.business_id]
-        );
-        
-        if (session.rows.length === 0) {
-            return res.status(404).json({ error: 'Session not found' });
-        }
-        
-        if (session.rows[0].status !== 'in_progress') {
-            return res.status(400).json({ error: 'Session is already completed' });
-        }
-        
-        // Get all counts for this session
-        const counts = await client.query(
-            `SELECT pci.*, p.name_translations, p.selling_price
-             FROM physical_count_items pci
-             JOIN products p ON pci.product_id = p.id
-             WHERE pci.session_id = $1`,
-            [session_id]
-        );
-        
-        const adjustments = [];
-        let totalDifference = 0;
-        let totalValueDifference = 0;
-        
-        for (const count of counts.rows) {
-            const difference = count.physical_stock - count.system_stock;
-            const valueDifference = difference * count.selling_price;
-            
-            adjustments.push({
-                product_id: count.product_id,
-                product_name: count.name_translations?.en || 'Product',
-                system_stock: count.system_stock,
-                physical_stock: count.physical_stock,
-                difference: difference,
-                value_difference: valueDifference
-            });
-            
-            totalDifference += difference;
-            totalValueDifference += valueDifference;
-            
-            if (apply_adjustments && difference !== 0) {
-                // Update product stock
-                await client.query(
-                    'UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2',
-                    [count.physical_stock, count.product_id]
-                );
-                
-                // Record stock adjustment
-                const direction = difference > 0 ? 'in' : 'out';
-                await client.query(
-                    `INSERT INTO stock_adjustments 
-                     (business_id, product_id, user_id, adjustment_type, quantity, direction, reason)
-                     VALUES ($1, $2, $3, 'physical_count', $4, $5, $6)`,
-                    [req.user.business_id, count.product_id, req.user.id, Math.abs(difference), direction, `Physical count reconciliation - Session ${session.rows[0].session_number}`]
-                );
-            }
-        }
-        
-        // Update session status
-        await client.query(
-            `UPDATE physical_count_sessions 
-             SET status = 'completed', 
-                 completed_at = NOW(), 
-                 total_products_counted = $1,
-                 total_difference = $2,
-                 total_value_difference = $3
-             WHERE id = $4`,
-            [counts.rows.length, totalDifference, totalValueDifference, session_id]
-        );
-        
-        // Create summary report
-        const summary = {
-            session_number: session.rows[0].session_number,
-            started_at: session.rows[0].started_at,
-            completed_at: new Date(),
-            total_products: counts.rows.length,
-            total_difference: totalDifference,
-            total_value_difference: totalValueDifference,
-            adjustments_made: apply_adjustments,
-            adjustments: adjustments
-        };
-        
-        await client.query('COMMIT');
-        
-        res.json({ 
-            success: true, 
-            message: apply_adjustments ? 'Physical count completed and adjustments applied' : 'Physical count completed (no adjustments applied)',
-            summary: summary
-        });
-        
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Complete physical count error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        client.release();
-    }
-});
-
-// Cancel physical count session
-app.post('/api/physical-count/cancel', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { session_id } = req.body;
-        
-        await pool.query(
-            `UPDATE physical_count_sessions 
-             SET status = 'cancelled', cancelled_at = NOW()
-             WHERE id = $1 AND business_id = $2`,
-            [session_id, req.user.business_id]
-        );
-        
-        res.json({ success: true, message: 'Physical count session cancelled' });
-        
-    } catch (error) {
-        console.error('Cancel physical count error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get physical count history
-app.get('/api/physical-count/history', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { limit = 20, offset = 0 } = req.query;
-        
-        const result = await pool.query(
-            `SELECT pcs.*, u.full_name as created_by_name
-             FROM physical_count_sessions pcs
-             LEFT JOIN users u ON pcs.user_id = u.id
-             WHERE pcs.business_id = $1
-             ORDER BY pcs.created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [req.user.business_id, limit, offset]
-        );
-        
-        res.json({ sessions: result.rows });
-        
-    } catch (error) {
-        console.error('Get physical count history error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get specific physical count session details
-app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        const session = await pool.query(
-            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
-            [id, req.user.business_id]
-        );
-        
-        if (session.rows.length === 0) {
-            return res.status(404).json({ error: 'Session not found' });
-        }
-        
-        const items = await pool.query(
-            `SELECT pci.*, p.name_translations, p.selling_price, p.unit
-             FROM physical_count_items pci
-             JOIN products p ON pci.product_id = p.id
-             WHERE pci.session_id = $1
-             ORDER BY p.name_translations->>'en'`,
-            [id]
-        );
-        
-        res.json({ 
-            session: session.rows[0],
-            items: items.rows
-        });
-        
-    } catch (error) {
-        console.error('Get session details error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ============================================
-// META WHATSAPP CLOUD API (FREE)
-// ============================================
-
-// Send WhatsApp message via Meta Cloud API
 async function sendWhatsAppMessage(to, message) {
     try {
-        // Format Ethiopian phone number
         let formattedTo = to.replace(/\D/g, '');
         if (formattedTo.startsWith('0')) {
             formattedTo = '251' + formattedTo.substring(1);
@@ -2687,50 +2604,6 @@ async function sendWhatsAppMessage(to, message) {
     }
 }
 
-// Send WhatsApp template message (for official business accounts)
-async function sendWhatsAppTemplate(to, templateName, language = 'en', components = []) {
-    try {
-        let formattedTo = to.replace(/\D/g, '');
-        if (formattedTo.startsWith('0')) {
-            formattedTo = '251' + formattedTo.substring(1);
-        }
-        
-        const response = await fetch(
-            `https://graph.facebook.com/${META_API_VERSION}/${META_PHONE_NUMBER_ID}/messages`,
-            {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${META_ACCESS_TOKEN}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    messaging_product: 'whatsapp',
-                    recipient_type: 'individual',
-                    to: formattedTo,
-                    type: 'template',
-                    template: {
-                        name: templateName,
-                        language: { code: language },
-                        components: components
-                    }
-                })
-            }
-        );
-        
-        const result = await response.json();
-        
-        if (result.error) {
-            return { success: false, error: result.error.message };
-        }
-        
-        return { success: true, messageId: result.messages?.[0]?.id };
-        
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
-}
-
-// WhatsApp Reminder Endpoint
 app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
@@ -2746,15 +2619,12 @@ app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
             });
         }
         
-        // Personalize message
         const personalizedMessage = message
             .replace(/{name}/g, customerName)
             .replace(/{amount}/g, `${amount.toFixed(2)} ETB`);
         
-        // Send via Meta API
         const result = await sendWhatsAppMessage(phone, personalizedMessage);
         
-        // Log to database
         await pool.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'send_whatsapp', 'customer', $3, $4)`,
@@ -2782,7 +2652,6 @@ app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
     }
 });
 
-// Bulk WhatsApp Reminder
 app.post('/api/send-whatsapp-bulk', authenticate, async (req, res) => {
     try {
         const { customerIds, message } = req.body;
@@ -2814,7 +2683,6 @@ app.post('/api/send-whatsapp-bulk', authenticate, async (req, res) => {
                     error: result.error
                 });
                 
-                // Add small delay to avoid rate limiting
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
@@ -2836,7 +2704,6 @@ app.post('/api/send-whatsapp-bulk', authenticate, async (req, res) => {
     }
 });
 
-// Test WhatsApp Configuration
 app.get('/api/test-whatsapp-config', authenticate, async (req, res) => {
     const isConfigured = !!(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
     
@@ -2853,39 +2720,29 @@ app.get('/api/test-whatsapp-config', authenticate, async (req, res) => {
 // ============================================
 // SALES TARGET ENDPOINTS
 // ============================================
-
-// ============================================
-// COMPLETE SALES TARGET ENDPOINTS
-// ============================================
-
-// Get sales targets (today, monthly, yearly)
 app.get('/api/sales-targets', authenticate, async (req, res) => {
     try {
         const today = new Date().toISOString().split('T')[0];
         const thisMonth = new Date().getMonth() + 1;
         const thisYear = new Date().getFullYear();
         
-        // Get today's target
         let todayTarget = await pool.query(
             'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_date = $2',
             [req.user.business_id, today]
         );
         let todayTargetAmount = parseFloat(todayTarget.rows[0]?.target_amount || 0);
         
-        // Get today's sales
         const todaySales = await pool.query(
             'SELECT COALESCE(SUM(total_amount), 0) as total FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = \'completed\'',
             [req.user.business_id, today]
         );
         
-        // Get monthly target
         let monthTarget = await pool.query(
             'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_month = $2 AND target_year = $3',
             [req.user.business_id, thisMonth, thisYear]
         );
         let monthTargetAmount = parseFloat(monthTarget.rows[0]?.target_amount || 0);
         
-        // Get month-to-date sales
         const monthSales = await pool.query(
             `SELECT COALESCE(SUM(total_amount), 0) as total 
              FROM sales 
@@ -2896,14 +2753,12 @@ app.get('/api/sales-targets', authenticate, async (req, res) => {
             [req.user.business_id, thisMonth, thisYear]
         );
         
-        // Get yearly target
         let yearTarget = await pool.query(
             'SELECT target_amount FROM sales_targets WHERE business_id = $1 AND target_year = $2 AND target_month IS NULL',
             [req.user.business_id, thisYear]
         );
         let yearTargetAmount = parseFloat(yearTarget.rows[0]?.target_amount || 0);
         
-        // Get year-to-date sales
         const yearSales = await pool.query(
             `SELECT COALESCE(SUM(total_amount), 0) as total 
              FROM sales 
@@ -2928,7 +2783,6 @@ app.get('/api/sales-targets', authenticate, async (req, res) => {
     }
 });
 
-// Set today's target
 app.post('/api/sales-targets/today', authenticate, async (req, res) => {
     try {
         const { target } = req.body;
@@ -2949,7 +2803,6 @@ app.post('/api/sales-targets/today', authenticate, async (req, res) => {
     }
 });
 
-// Set monthly target
 app.post('/api/sales-targets/monthly', authenticate, async (req, res) => {
     try {
         const { month, year, target } = req.body;
@@ -2969,7 +2822,6 @@ app.post('/api/sales-targets/monthly', authenticate, async (req, res) => {
     }
 });
 
-// Set yearly target
 app.post('/api/sales-targets/yearly', authenticate, async (req, res) => {
     try {
         const { year, target } = req.body;
@@ -2989,7 +2841,6 @@ app.post('/api/sales-targets/yearly', authenticate, async (req, res) => {
     }
 });
 
-// Get target history
 app.get('/api/sales-targets/history', authenticate, async (req, res) => {
     try {
         const { period, year, month } = req.query;
@@ -3055,400 +2906,278 @@ app.get('/api/sales-targets/history', authenticate, async (req, res) => {
     }
 });
 
-
-// Add these endpoints to your server.js
-
 // ============================================
-// ADVANCED DAILY REPORT WITH GROWTH & Z-REPORT
+// PHYSICAL COUNT RECONCILIATION
 // ============================================
-app.get('/api/reports/advanced/daily', authenticate, async (req, res) => {
+app.post('/api/physical-count/start', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const date = req.query.date || new Date().toISOString().split('T')[0];
-        const yesterday = new Date(new Date(date) - 86400000).toISOString().split('T')[0];
+        const { notes } = req.body;
         
-        // Main query for current day
-        const currentDayQuery = await pool.query(`
-            WITH sales_data AS (
-                SELECT 
-                    COALESCE(SUM(s.total_amount), 0) as total_revenue,
-                    COUNT(*) as total_sales,
-                    COUNT(DISTINCT s.customer_id) as unique_customers,
-                    COALESCE(SUM(CASE WHEN s.payment_method = 'cash' THEN s.total_amount ELSE 0 END), 0) as cash_sales,
-                    COALESCE(SUM(CASE WHEN s.payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN s.total_amount ELSE 0 END), 0) as digital_sales,
-                    COALESCE(SUM(CASE WHEN s.payment_status = 'credit' THEN s.total_amount ELSE 0 END), 0) as credit_sales,
-                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
-                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit,
-                    COALESCE(SUM(s.tax_amount), 0) as total_tax
-                FROM sales s
-                LEFT JOIN sale_items si ON s.id = si.sale_id
-                LEFT JOIN products p ON si.product_id = p.id
-                WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
-                GROUP BY s.sale_date
-            ),
-            expenses_data AS (
-                SELECT COALESCE(SUM(amount), 0) as total_expenses
-                FROM expenses
-                WHERE business_id = $1 AND expense_date = $2
-            ),
-            previous_day AS (
-                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
-                       COUNT(*) as prev_sales
-                FROM sales
-                WHERE business_id = $1 AND sale_date = $3 AND status = 'completed'
-            ),
-            cashout_data AS (
-                SELECT opening_cash_balance, actual_cash_balance
-                FROM daily_cashouts
-                WHERE business_id = $1 AND cashout_date = $2
-                LIMIT 1
-            )
-            SELECT 
-                sd.*,
-                ed.total_expenses,
-                pd.prev_revenue,
-                pd.prev_sales,
-                sd.gross_profit - ed.total_expenses as net_profit,
-                cd.opening_cash_balance,
-                cd.actual_cash_balance,
-                -- Growth calculations
-                CASE WHEN pd.prev_revenue > 0 THEN ((sd.total_revenue - pd.prev_revenue) / pd.prev_revenue) * 100 ELSE 0 END as revenue_growth,
-                CASE WHEN pd.prev_sales > 0 THEN ((sd.total_sales - pd.prev_sales) / pd.prev_sales) * 100 ELSE 0 END as sales_growth,
-                -- Z-Report expected cash
-                COALESCE(cd.opening_cash_balance, 0) + sd.cash_sales as expected_cash_balance,
-                -- Margins
-                CASE WHEN sd.total_revenue > 0 THEN (sd.gross_profit / sd.total_revenue) * 100 ELSE 0 END as gross_margin,
-                CASE WHEN sd.total_revenue > 0 THEN ((sd.gross_profit - ed.total_expenses) / sd.total_revenue) * 100 ELSE 0 END as net_margin
-            FROM sales_data sd
-            CROSS JOIN expenses_data ed
-            CROSS JOIN previous_day pd
-            LEFT JOIN cashout_data cd ON true
-        `, [req.user.business_id, date, yesterday]);
+        const activeSession = await pool.query(
+            `SELECT id FROM physical_count_sessions 
+             WHERE business_id = $1 AND status = 'in_progress'`,
+            [req.user.business_id]
+        );
         
-        // Get top products for the day
-        const topProducts = await pool.query(`
-            SELECT 
-                p.name_translations->>'en' as product_name,
-                COALESCE(SUM(si.quantity), 0) as total_quantity,
-                COALESCE(SUM(si.total_price), 0) as total_revenue,
-                (SUM(si.total_price) / (SELECT COALESCE(SUM(total_amount), 1) FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = 'completed')) * 100 as percentage
-            FROM sale_items si
-            JOIN sales s ON si.sale_id = s.id
-            JOIN products p ON si.product_id = p.id
-            WHERE s.business_id = $1 AND s.sale_date = $2 AND s.status = 'completed'
-            GROUP BY p.id, p.name_translations
-            ORDER BY total_revenue DESC
-            LIMIT 5
-        `, [req.user.business_id, date]);
-        
-        const result = currentDayQuery.rows[0] || {};
-        
-        res.json({
-            success: true,
-            period: { date: date },
-            summary: {
-                total_revenue: parseFloat(result.total_revenue || 0),
-                total_sales: parseInt(result.total_sales || 0),
-                unique_customers: parseInt(result.unique_customers || 0),
-                average_transaction: result.total_sales > 0 ? (result.total_revenue / result.total_sales) : 0,
-                total_tax: parseFloat(result.total_tax || 0)
-            },
-            profit: {
-                cogs: parseFloat(result.cogs || 0),
-                gross_profit: parseFloat(result.gross_profit || 0),
-                gross_margin: parseFloat(result.gross_margin || 0),
-                total_expenses: parseFloat(result.total_expenses || 0),
-                net_profit: parseFloat(result.net_profit || 0),
-                net_margin: parseFloat(result.net_margin || 0)
-            },
-            growth: {
-                revenue_growth: parseFloat(result.revenue_growth || 0),
-                sales_growth: parseFloat(result.sales_growth || 0),
-                previous_revenue: parseFloat(result.prev_revenue || 0),
-                previous_sales: parseInt(result.prev_sales || 0),
-                trend: result.revenue_growth > 0 ? 'up' : (result.revenue_growth < 0 ? 'down' : 'same')
-            },
-            payment_breakdown: {
-                cash: parseFloat(result.cash_sales || 0),
-                digital: parseFloat(result.digital_sales || 0),
-                credit: parseFloat(result.credit_sales || 0)
-            },
-            z_report: {
-                opening_cash: parseFloat(result.opening_cash_balance || 0),
-                cash_sales: parseFloat(result.cash_sales || 0),
-                expected_cash: parseFloat(result.expected_cash_balance || 0),
-                actual_cash: parseFloat(result.actual_cash_balance || null),
-                status: result.actual_cash_balance ? (result.actual_cash_balance >= result.expected_cash_balance ? 'balanced' : 'short') : 'pending'
-            },
-            top_products: topProducts.rows
-        });
-        
-    } catch (error) {
-        console.error('Daily report error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ============================================
-// ADVANCED MONTHLY REPORT WITH COMPARISON
-// ============================================
-app.get('/api/reports/advanced/monthly', authenticate, async (req, res) => {
-    try {
-        const { month, year } = req.query;
-        const targetMonth = month || new Date().getMonth() + 1;
-        const targetYear = year || new Date().getFullYear();
-        
-        // Calculate previous month
-        let prevMonth = targetMonth - 1;
-        let prevYear = targetYear;
-        if (prevMonth === 0) {
-            prevMonth = 12;
-            prevYear = targetYear - 1;
+        if (activeSession.rows.length > 0) {
+            return res.status(400).json({ 
+                error: 'There is already an active physical count session. Please complete or cancel it first.' 
+            });
         }
         
-        const result = await pool.query(`
-            WITH current_month AS (
-                SELECT 
-                    COALESCE(SUM(s.total_amount), 0) as revenue,
-                    COUNT(*) as sales_count,
-                    COUNT(DISTINCT s.customer_id) as customers,
-                    COALESCE(SUM(si.quantity * p.cost_price), 0) as cogs,
-                    COALESCE(SUM(s.total_amount) - SUM(si.quantity * p.cost_price), 0) as gross_profit
-                FROM sales s
-                LEFT JOIN sale_items si ON s.id = si.sale_id
-                LEFT JOIN products p ON si.product_id = p.id
-                WHERE s.business_id = $1 
-                    AND EXTRACT(MONTH FROM s.sale_date) = $2 
-                    AND EXTRACT(YEAR FROM s.sale_date) = $3
-                    AND s.status = 'completed'
-            ),
-            current_expenses AS (
-                SELECT COALESCE(SUM(amount), 0) as expenses
-                FROM expenses
-                WHERE business_id = $1 
-                    AND EXTRACT(MONTH FROM expense_date) = $2 
-                    AND EXTRACT(YEAR FROM expense_date) = $3
-            ),
-            previous_month AS (
-                SELECT COALESCE(SUM(total_amount), 0) as prev_revenue,
-                       COUNT(*) as prev_sales
-                FROM sales
-                WHERE business_id = $1 
-                    AND EXTRACT(MONTH FROM sale_date) = $4 
-                    AND EXTRACT(YEAR FROM sale_date) = $5
-                    AND status = 'completed'
-            )
-            SELECT 
-                cm.*,
-                ce.expenses,
-                pm.prev_revenue,
-                pm.prev_sales,
-                cm.gross_profit - ce.expenses as net_profit,
-                -- Growth
-                CASE WHEN pm.prev_revenue > 0 THEN ((cm.revenue - pm.prev_revenue) / pm.prev_revenue) * 100 ELSE 0 END as revenue_growth,
-                CASE WHEN pm.prev_sales > 0 THEN ((cm.sales_count - pm.prev_sales) / pm.prev_sales) * 100 ELSE 0 END as sales_growth,
-                -- Margins
-                CASE WHEN cm.revenue > 0 THEN (cm.gross_profit / cm.revenue) * 100 ELSE 0 END as gross_margin,
-                CASE WHEN cm.revenue > 0 THEN ((cm.gross_profit - ce.expenses) / cm.revenue) * 100 ELSE 0 END as net_margin
-            FROM current_month cm
-            CROSS JOIN current_expenses ce
-            CROSS JOIN previous_month pm
-        `, [req.user.business_id, targetMonth, targetYear, prevMonth, prevYear]);
+        const result = await pool.query(
+            `INSERT INTO physical_count_sessions (business_id, user_id, status, notes, started_at)
+             VALUES ($1, $2, 'in_progress', $3, NOW())
+             RETURNING id`,
+            [req.user.business_id, req.user.id, notes]
+        );
         
-        // Get monthly top products
-        const topProducts = await pool.query(`
-            SELECT 
-                p.name_translations->>'en' as product_name,
-                COALESCE(SUM(si.quantity), 0) as total_quantity,
-                COALESCE(SUM(si.total_price), 0) as total_revenue
-            FROM sale_items si
-            JOIN sales s ON si.sale_id = s.id
-            JOIN products p ON si.product_id = p.id
-            WHERE s.business_id = $1 
-                AND EXTRACT(MONTH FROM s.sale_date) = $2 
-                AND EXTRACT(YEAR FROM s.sale_date) = $3
-                AND s.status = 'completed'
-            GROUP BY p.id, p.name_translations
-            ORDER BY total_revenue DESC
-            LIMIT 5
-        `, [req.user.business_id, targetMonth, targetYear]);
+        const sessionNumber = `PC-${new Date().getFullYear()}${(new Date().getMonth() + 1).toString().padStart(2, '0')}${result.rows[0].id.toString().substring(0, 8)}`;
         
-        const row = result.rows[0] || {};
+        await pool.query(
+            'UPDATE physical_count_sessions SET session_number = $1 WHERE id = $2',
+            [sessionNumber, result.rows[0].id]
+        );
         
-        res.json({
-            success: true,
-            period: { month: targetMonth, year: targetYear },
-            summary: {
-                total_revenue: parseFloat(row.revenue || 0),
-                total_sales: parseInt(row.sales_count || 0),
-                unique_customers: parseInt(row.customers || 0),
-                average_transaction: row.sales_count > 0 ? (row.revenue / row.sales_count) : 0
-            },
-            profit: {
-                cogs: parseFloat(row.cogs || 0),
-                gross_profit: parseFloat(row.gross_profit || 0),
-                gross_margin: parseFloat(row.gross_margin || 0),
-                total_expenses: parseFloat(row.expenses || 0),
-                net_profit: parseFloat(row.net_profit || 0),
-                net_margin: parseFloat(row.net_margin || 0)
-            },
-            growth: {
-                revenue_growth: parseFloat(row.revenue_growth || 0),
-                sales_growth: parseFloat(row.sales_growth || 0),
-                previous_revenue: parseFloat(row.prev_revenue || 0),
-                previous_sales: parseInt(row.prev_sales || 0),
-                trend: row.revenue_growth > 0 ? 'up' : (row.revenue_growth < 0 ? 'down' : 'same')
-            },
-            top_products: topProducts.rows
+        res.json({ 
+            success: true, 
+            session_id: result.rows[0].id,
+            session_number: sessionNumber
         });
         
     } catch (error) {
-        console.error('Monthly report error:', error);
+        console.error('Start physical count error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// ============================================
-// Z-REPORT CLOSING ENDPOINT
-// ============================================
-app.post('/api/z-report/close', authenticate, async (req, res) => {
+app.post('/api/physical-count/save-count', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { session_id, product_id, system_stock, physical_stock, counted_by } = req.body;
+        
+        const session = await pool.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [session_id, req.user.business_id]
+        );
+        
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        
+        if (session.rows[0].status !== 'in_progress') {
+            return res.status(400).json({ error: 'Session is already completed or cancelled' });
+        }
+        
+        const existing = await pool.query(
+            `SELECT id FROM physical_count_items 
+             WHERE session_id = $1 AND product_id = $2`,
+            [session_id, product_id]
+        );
+        
+        if (existing.rows.length > 0) {
+            await pool.query(
+                `UPDATE physical_count_items 
+                 SET physical_stock = $1, counted_at = NOW(), counted_by = $2
+                 WHERE session_id = $3 AND product_id = $4`,
+                [physical_stock, counted_by || req.user.id, session_id, product_id]
+            );
+        } else {
+            await pool.query(
+                `INSERT INTO physical_count_items 
+                 (session_id, product_id, system_stock, physical_stock, counted_by, counted_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())`,
+                [session_id, product_id, system_stock, physical_stock, counted_by || req.user.id]
+            );
+        }
+        
+        res.json({ success: true, message: 'Count saved successfully' });
+        
+    } catch (error) {
+        console.error('Save physical count error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/physical-count/complete', authenticate, authorize('owner', 'manager'), async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
-        const { actual_cash_balance, notes } = req.body;
-        const today = new Date().toISOString().split('T')[0];
+        const { session_id, apply_adjustments = true } = req.body;
         
-        // Get previous day's closing balance
-        const prevDay = new Date();
-        prevDay.setDate(prevDay.getDate() - 1);
-        const prevDayStr = prevDay.toISOString().split('T')[0];
-        
-        const prevCashout = await client.query(
-            'SELECT actual_cash_balance FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2 AND is_closed = true',
-            [req.user.business_id, prevDayStr]
+        const session = await client.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [session_id, req.user.business_id]
         );
         
-        const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
         
-        // Get today's cash sales
-        const cashSales = await client.query(
-            'SELECT COALESCE(SUM(total_amount), 0) as cash_total FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_method = \'cash\' AND status = \'completed\'',
-            [req.user.business_id, today]
+        if (session.rows[0].status !== 'in_progress') {
+            return res.status(400).json({ error: 'Session is already completed' });
+        }
+        
+        const counts = await client.query(
+            `SELECT pci.*, p.name_translations, p.selling_price
+             FROM physical_count_items pci
+             JOIN products p ON pci.product_id = p.id
+             WHERE pci.session_id = $1`,
+            [session_id]
         );
         
-        // Get today's cash expenses
-        const cashExpenses = await client.query(
-            'SELECT COALESCE(SUM(amount), 0) as expense_total FROM expenses WHERE business_id = $1 AND expense_date = $2 AND payment_method = \'cash\'',
-            [req.user.business_id, today]
+        const adjustments = [];
+        let totalDifference = 0;
+        let totalValueDifference = 0;
+        
+        for (const count of counts.rows) {
+            const difference = count.physical_stock - count.system_stock;
+            const valueDifference = difference * count.selling_price;
+            
+            adjustments.push({
+                product_id: count.product_id,
+                product_name: count.name_translations?.en || 'Product',
+                system_stock: count.system_stock,
+                physical_stock: count.physical_stock,
+                difference: difference,
+                value_difference: valueDifference
+            });
+            
+            totalDifference += difference;
+            totalValueDifference += valueDifference;
+            
+            if (apply_adjustments && difference !== 0) {
+                await client.query(
+                    'UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2',
+                    [count.physical_stock, count.product_id]
+                );
+                
+                const direction = difference > 0 ? 'in' : 'out';
+                await client.query(
+                    `INSERT INTO stock_adjustments 
+                     (business_id, product_id, user_id, adjustment_type, quantity, direction, reason)
+                     VALUES ($1, $2, $3, 'physical_count', $4, $5, $6)`,
+                    [req.user.business_id, count.product_id, req.user.id, Math.abs(difference), direction, `Physical count reconciliation - Session ${session.rows[0].session_number}`]
+                );
+            }
+        }
+        
+        await client.query(
+            `UPDATE physical_count_sessions 
+             SET status = 'completed', 
+                 completed_at = NOW(), 
+                 total_products_counted = $1,
+                 total_difference = $2,
+                 total_value_difference = $3
+             WHERE id = $4`,
+            [counts.rows.length, totalDifference, totalValueDifference, session_id]
         );
         
-        const expectedCash = openingBalance + parseFloat(cashSales.rows[0].cash_total) - parseFloat(cashExpenses.rows[0].expense_total);
-        const difference = actual_cash_balance - expectedCash;
-        const status = difference === 0 ? 'exact' : (difference > 0 ? 'over' : 'short');
-        
-        // Save Z-Report
-        const result = await client.query(
-            `INSERT INTO daily_cashouts (
-                business_id, user_id, cashout_date, opening_cash_balance, 
-                cash_sales, cash_expenses, expected_cash_balance, 
-                actual_cash_balance, cash_difference, status, notes, is_closed, closed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, NOW())
-            ON CONFLICT (business_id, cashout_date) 
-            DO UPDATE SET 
-                actual_cash_balance = $8,
-                cash_difference = $9,
-                status = $10,
-                notes = $11,
-                is_closed = true,
-                closed_at = NOW()
-            RETURNING *`,
-            [req.user.business_id, req.user.id, today, openingBalance, 
-             cashSales.rows[0].cash_total, cashExpenses.rows[0].expense_total,
-             expectedCash, actual_cash_balance, Math.abs(difference), status, notes]
-        );
+        const summary = {
+            session_number: session.rows[0].session_number,
+            started_at: session.rows[0].started_at,
+            completed_at: new Date(),
+            total_products: counts.rows.length,
+            total_difference: totalDifference,
+            total_value_difference: totalValueDifference,
+            adjustments_made: apply_adjustments,
+            adjustments: adjustments
+        };
         
         await client.query('COMMIT');
         
-        // Generate Z-Report summary
-        const summary = {
-            date: today,
-            opening_balance: openingBalance,
-            cash_sales: parseFloat(cashSales.rows[0].cash_total),
-            cash_expenses: parseFloat(cashExpenses.rows[0].expense_total),
-            expected_cash: expectedCash,
-            actual_cash: actual_cash_balance,
-            difference: difference,
-            status: status
-        };
-        
         res.json({ 
             success: true, 
-            cashout: result.rows[0],
-            summary: summary,
-            message: status === 'short' 
-                ? `⚠️ Cash Shortage: ${Math.abs(difference)} ETB. Please check your records.` 
-                : status === 'over' 
-                    ? `✅ Cash Over: ${difference} ETB extra. Verify for errors.` 
-                    : '✅ Cash balanced perfectly! Z-Report closed.'
+            message: apply_adjustments ? 'Physical count completed and adjustments applied' : 'Physical count completed (no adjustments applied)',
+            summary: summary
         });
         
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('Z-Report error:', error);
+        console.error('Complete physical count error:', error);
         res.status(500).json({ error: error.message });
     } finally {
         client.release();
     }
 });
 
-// ============================================
-// GET Z-REPORT STATUS
-// ============================================
-app.get('/api/z-report/status', authenticate, async (req, res) => {
+app.post('/api/physical-count/cancel', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const today = new Date().toISOString().split('T')[0];
+        const { session_id } = req.body;
         
-        const result = await pool.query(
-            `SELECT * FROM daily_cashouts 
-             WHERE business_id = $1 AND cashout_date = $2`,
-            [req.user.business_id, today]
+        await pool.query(
+            `UPDATE physical_count_sessions 
+             SET status = 'cancelled', cancelled_at = NOW()
+             WHERE id = $1 AND business_id = $2`,
+            [session_id, req.user.business_id]
         );
         
-        const isClosed = result.rows.length > 0 && result.rows[0].is_closed === true;
-        
-        res.json({ 
-            is_closed: isClosed,
-            cashout: result.rows[0] || null,
-            message: isClosed ? 'Z-Report already closed for today' : 'Z-Report pending. Ready to close.'
-        });
+        res.json({ success: true, message: 'Physical count session cancelled' });
         
     } catch (error) {
+        console.error('Cancel physical count error:', error);
         res.status(500).json({ error: error.message });
     }
 });
-// UPDATE EXPENSE
-app.put('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+
+app.get('/api/physical-count/history', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
-        const { id } = req.params;
-        const { category, amount, description } = req.body;
+        const { limit = 20, offset = 0 } = req.query;
+        
         const result = await pool.query(
-            'UPDATE expenses SET category = COALESCE($1, category), amount = COALESCE($2, amount), description = COALESCE($3, description), updated_at = NOW() WHERE id = $4 AND business_id = $5 RETURNING *',
-            [category, amount, description, id, req.user.business_id]
+            `SELECT pcs.*, u.full_name as created_by_name
+             FROM physical_count_sessions pcs
+             LEFT JOIN users u ON pcs.user_id = u.id
+             WHERE pcs.business_id = $1
+             ORDER BY pcs.created_at DESC
+             LIMIT $2 OFFSET $3`,
+            [req.user.business_id, limit, offset]
         );
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
-        res.json({ success: true, expense: result.rows[0], message: 'Expense updated' });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+        
+        res.json({ sessions: result.rows });
+        
+    } catch (error) {
+        console.error('Get physical count history error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
-// DELETE EXPENSE
-app.delete('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+app.get('/api/physical-count/session/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('DELETE FROM expenses WHERE id = $1 AND business_id = $2 RETURNING id', [id, req.user.business_id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
-        res.json({ success: true, message: 'Expense deleted' });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+        
+        const session = await pool.query(
+            'SELECT * FROM physical_count_sessions WHERE id = $1 AND business_id = $2',
+            [id, req.user.business_id]
+        );
+        
+        if (session.rows.length === 0) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        
+        const items = await pool.query(
+            `SELECT pci.*, p.name_translations, p.selling_price, p.unit
+             FROM physical_count_items pci
+             JOIN products p ON pci.product_id = p.id
+             WHERE pci.session_id = $1
+             ORDER BY p.name_translations->>'en'`,
+            [id]
+        );
+        
+        res.json({ 
+            session: session.rows[0],
+            items: items.rows
+        });
+        
+    } catch (error) {
+        console.error('Get session details error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
+
+// ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
+app.use(Sentry.Handlers.errorHandler());
+
 // ============================================
 // START SERVER
 // ============================================
@@ -3458,6 +3187,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📍 API URL: ${process.env.API_URL || 'https://smart-sme-api.onrender.com'}`);
     console.log(`📅 Ethiopian Calendar Support: Enabled`);
     console.log(`💰 Tax System: Optional (VAT/TOT/None)`);
+    console.log(`🔍 Sentry Error Tracking: Active`);
 });
 
 module.exports = app;
