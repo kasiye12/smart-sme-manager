@@ -3182,302 +3182,21 @@ app.get('/api/app-version', async (req, res) => {
         update_required: false
     });
 });
-
 // ============================================
-// CLIENT MANAGEMENT (SUPER ADMIN)
-// ============================================
-
-// Get all clients
-app.get('/api/admin/clients', authenticate, authorize('owner'), async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT c.*, 
-                   (SELECT COUNT(*) FROM sales WHERE business_id = c.business_id) as total_sales,
-                   (SELECT COUNT(*) FROM customers WHERE business_id = c.business_id) as total_customers,
-                   (SELECT COUNT(*) FROM products WHERE business_id = c.business_id) as total_products
-            FROM clients c
-            ORDER BY c.created_at DESC
-        `);
-        res.json({ clients: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Add new client
-app.post('/api/admin/clients', authenticate, authorize('owner'), async (req, res) => {
-    try {
-        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee } = req.body;
-        
-        const result = await pool.query(
-            `INSERT INTO clients (business_name, owner_name, phone, email, city, subscription_plan, monthly_fee)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-            [business_name, owner_name, phone, email, city, subscription_plan || 'free', monthly_fee || 0]
-        );
-        
-        res.status(201).json({ success: true, client: result.rows[0] });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Update client
-app.put('/api/admin/clients/:id', authenticate, authorize('owner'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes } = req.body;
-        
-        const result = await pool.query(
-            `UPDATE clients SET 
-                business_name = COALESCE($1, business_name),
-                owner_name = COALESCE($2, owner_name),
-                phone = COALESCE($3, phone),
-                email = COALESCE($4, email),
-                city = COALESCE($5, city),
-                subscription_plan = COALESCE($6, subscription_plan),
-                monthly_fee = COALESCE($7, monthly_fee),
-                is_active = COALESCE($8, is_active),
-                notes = COALESCE($9, notes),
-                updated_at = NOW()
-             WHERE id = $10 RETURNING *`,
-            [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes, id]
-        );
-        
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Client not found' });
-        res.json({ success: true, client: result.rows[0] });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Record client payment
-app.post('/api/admin/clients/:id/payment', authenticate, authorize('owner'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { amount, payment_method, reference_number, notes } = req.body;
-        
-        await pool.query(
-            `INSERT INTO client_payments (client_id, amount, payment_method, reference_number, notes)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [id, amount, payment_method, reference_number, notes]
-        );
-        
-        await pool.query(
-            'UPDATE clients SET total_paid = total_paid + $1, updated_at = NOW() WHERE id = $2',
-            [amount, id]
-        );
-        
-        res.json({ success: true, message: 'Payment recorded' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get client dashboard stats
-app.get('/api/admin/dashboard', authenticate, authorize('owner'), async (req, res) => {
-    try {
-        const totalClients = await pool.query('SELECT COUNT(*) FROM clients WHERE is_active = true');
-        const activeToday = await pool.query('SELECT COUNT(*) FROM clients WHERE last_login_date = CURRENT_DATE');
-        const monthlyRevenue = await pool.query('SELECT COALESCE(SUM(monthly_fee), 0) as total FROM clients WHERE is_active = true');
-        const pendingPayments = await pool.query('SELECT COUNT(*) FROM clients WHERE payment_status = $1', ['pending']);
-        const totalSales = await pool.query('SELECT COALESCE(SUM(total_amount), 0) as total FROM sales');
-        
-        res.json({
-            total_clients: parseInt(totalClients.rows[0].count),
-            active_today: parseInt(activeToday.rows[0].count),
-            monthly_revenue: parseFloat(monthlyRevenue.rows[0].total),
-            pending_payments: parseInt(pendingPayments.rows[0].count),
-            total_platform_sales: parseFloat(totalSales.rows[0].total)
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-// ============================================
-// CLIENT MANAGEMENT (SUPER ADMIN)
+// CLIENT MANAGEMENT (SUPER ADMIN) - KEEP ONLY THIS ONE
 // ============================================
 
-// Get all clients with stats
 app.get('/api/admin/clients', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { search, plan, status, page = 1, limit = 20 } = req.query;
-        const offset = (page - 1) * limit;
-        
-        let query = `
-            SELECT c.*, 
-                   (SELECT COUNT(*) FROM sales WHERE businesses.id = c.business_id) as total_sales,
-                   (SELECT COALESCE(SUM(total_amount),0) FROM sales WHERE businesses.id = c.business_id) as total_revenue
-            FROM clients c
-            LEFT JOIN businesses ON c.business_id = businesses.id
-            WHERE 1=1
-        `;
-        const params = [];
-        
-        if (search) {
-            params.push(`%${search}%`);
-            query += ` AND (c.business_name ILIKE $${params.length} OR c.owner_name ILIKE $${params.length} OR c.phone ILIKE $${params.length})`;
-        }
-        if (plan) { params.push(plan); query += ` AND c.subscription_plan = $${params.length}`; }
-        if (status) { params.push(status); query += ` AND c.payment_status = $${params.length}`; }
-        
-        query += ` ORDER BY c.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(limit, offset);
-        
-        const result = await pool.query(query, params);
-        const countResult = await pool.query('SELECT COUNT(*) FROM clients');
-        
-        res.json({ 
-            clients: result.rows,
-            total: parseInt(countResult.rows[0].count),
-            page: parseInt(page),
-            totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limit)
-        });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// Get admin dashboard stats
-app.get('/api/admin/dashboard', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const stats = await pool.query(`
-            SELECT 
-                (SELECT COUNT(*) FROM clients WHERE is_active = true) as total_clients,
-                (SELECT COUNT(*) FROM clients WHERE created_at > NOW() - INTERVAL '30 days') as new_this_month,
-                (SELECT COALESCE(SUM(monthly_fee), 0) FROM clients WHERE is_active = true) as mrr,
-                (SELECT COUNT(*) FROM clients WHERE payment_status = 'pending') as pending_payments,
-                (SELECT COALESCE(SUM(amount), 0) FROM client_payments WHERE payment_date > NOW() - INTERVAL '30 days') as collected_this_month,
-                (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')) as open_tickets
-        `);
-        res.json(stats.rows[0]);
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// Add new client
-app.post('/api/admin/clients', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { business_name, owner_name, phone, email, city, region, subscription_plan, monthly_fee } = req.body;
-        if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'Name, owner, and phone required' });
-        
-        const result = await pool.query(
-            `INSERT INTO clients (business_name, owner_name, phone, email, city, region, subscription_plan, monthly_fee, subscription_start, subscription_end)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CURRENT_DATE, CURRENT_DATE + INTERVAL '30 days') RETURNING *`,
-            [business_name, owner_name, phone, email, city, region, subscription_plan || 'trial', monthly_fee || 0]
-        );
-        res.status(201).json({ success: true, client: result.rows[0] });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// Update client
-app.put('/api/admin/clients/:id', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const updates = req.body;
-        updates.updated_at = 'NOW()';
-        
-        const keys = Object.keys(updates).filter(k => k !== 'id');
-        const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-        const values = keys.map(k => updates[k]);
-        values.push(id);
-        
-        const result = await pool.query(
-            `UPDATE clients SET ${setClause} WHERE id = $${values.length} RETURNING *`,
-            values
-        );
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Client not found' });
-        res.json({ success: true, client: result.rows[0] });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// Record client payment
-app.post('/api/admin/clients/:id/payment', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        const { id } = req.params;
-        const { amount, payment_method, receipt_number, notes } = req.body;
-        
-        await client.query(
-            `INSERT INTO client_payments (client_id, amount, payment_method, receipt_number, notes, recorded_by)
-             VALUES ($1,$2,$3,$4,$5,$6)`,
-            [id, amount, payment_method || 'cash', receipt_number, notes, req.user.id]
-        );
-        await client.query(
-            'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
-            [amount, 'paid', id]
-        );
-        await client.query('COMMIT');
-        res.json({ success: true, message: 'Payment recorded successfully' });
-    } catch (error) {
-        await client.query('ROLLBACK');
-        res.status(500).json({ error: error.message });
-    } finally { client.release(); }
-});
-
-// Create support ticket
-app.post('/api/admin/tickets', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { client_id, subject, description, priority } = req.body;
-        const result = await pool.query(
-            `INSERT INTO support_tickets (client_id, subject, description, priority) VALUES ($1,$2,$3,$4) RETURNING *`,
-            [client_id, subject, description, priority || 'medium']
-        );
-        res.status(201).json({ success: true, ticket: result.rows[0] });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// Update ticket status
-app.put('/api/admin/tickets/:id', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { status } = req.body;
-        const resolvedAt = status === 'resolved' ? 'NOW()' : null;
-        
-        await pool.query(
-            `UPDATE support_tickets SET status = $1, resolved_at = ${resolvedAt} WHERE id = $2`,
-            [status, id]
-        );
-        res.json({ success: true, message: 'Ticket updated' });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-// ============================================
-// ADMIN PANEL APIs
-// ============================================
-
-// ============================================
-// ADMIN PANEL APIs
-// ============================================
-
-// ============================================
-// ADMIN PANEL APIs
-// ============================================
-app.get('/api/admin/dashboard', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT (SELECT COUNT(*) FROM clients) as total_clients, 0 as mrr, 0 as pending_payments, 0 as open_tickets');
-        res.json(result.rows[0] || { total_clients: 0 });
-    } catch (error) { res.json({ total_clients: 0 }); }
-});
-
-app.get('/api/admin/clients', authenticate, async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
         res.json({ clients: result.rows });
-    } catch (error) { res.json({ clients: [] }); }
-});
-
-app.post('/api/admin/clients', authenticate, async (req, res) => {
-    try {
-        const { business_name, owner_name, phone } = req.body;
-        if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'All fields required' });
-        const result = await pool.query('INSERT INTO clients (business_name, owner_name, phone) VALUES ($1,$2,$3) RETURNING *', [business_name, owner_name, phone]);
-        res.status(201).json({ success: true, client: result.rows[0] });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.post('/api/admin/clients', authenticate, async (req, res) => {
+app.post('/api/admin/clients', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const { business_name, owner_name, phone, subscription_plan, monthly_fee } = req.body;
-        if (!business_name || !owner_name || !phone) {
-            return res.status(400).json({ error: 'All fields required' });
-        }
+        if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'All fields required' });
         const result = await pool.query(
             'INSERT INTO clients (business_name, owner_name, phone, subscription_plan, monthly_fee) VALUES ($1,$2,$3,$4,$5) RETURNING *',
             [business_name, owner_name, phone, subscription_plan || 'trial', monthly_fee || 0]
@@ -3485,6 +3204,20 @@ app.post('/api/admin/clients', authenticate, async (req, res) => {
         res.status(201).json({ success: true, client: result.rows[0] });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
+
+app.get('/api/admin/dashboard', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                (SELECT COUNT(*) FROM clients) as total_clients,
+                (SELECT COALESCE(SUM(monthly_fee),0) FROM clients WHERE is_active=true) as mrr,
+                (SELECT COUNT(*) FROM clients WHERE payment_status='pending') as pending_payments,
+                0 as open_tickets
+        `);
+        res.json(result.rows[0] || { total_clients: 0, mrr: 0 });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 
 // ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
 app.use(Sentry.Handlers.errorHandler());
