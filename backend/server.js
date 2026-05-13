@@ -3597,7 +3597,9 @@ app.get('/api/subscription/check', authenticate, async (req, res) => {
 app.put('/api/admin/subscriptions/:businessId/unlock', authenticate, async (req, res) => {
     try {
         await pool.query(
-            `UPDATE businesses SET payment_due_date = CURRENT_DATE + INTERVAL '30 days', subscription_end_date = CURRENT_DATE + INTERVAL '30 days', updated_at = NOW() WHERE id = $1`,
+            `UPDATE businesses SET payment_due_date = CURRENT_DATE + INTERVAL '30 days', 
+             subscription_end_date = CURRENT_DATE + INTERVAL '30 days', updated_at = NOW() 
+             WHERE id = $1`,
             [req.params.businessId]
         );
         res.json({ success: true, message: 'Account unlocked for 30 days' });
