@@ -3418,16 +3418,39 @@ app.put('/api/admin/clients/:id/toggle-status', authenticate, async (req, res) =
     }
 });
 
+// ============================================
+// ANNOUNCEMENTS
+// ============================================
+// ============================================
+// ANNOUNCEMENTS
+// ============================================
 app.get('/api/announcements', authenticate, async (req, res) => {
     try {
-        // Get latest announcement for this business
         const result = await pool.query(
-            'SELECT message FROM announcements WHERE business_id = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1',
+            `SELECT message FROM announcements 
+             WHERE (business_id = $1 OR business_id IS NULL) 
+             AND is_active = true 
+             ORDER BY created_at DESC LIMIT 1`,
             [req.user.business_id]
         );
         res.json(result.rows[0] || { message: null });
     } catch (error) {
         res.json({ message: null });
+    }
+});
+
+app.post('/api/announcements', authenticate, async (req, res) => {
+    try {
+        const { message } = req.body;
+        if (!message) return res.status(400).json({ error: 'Message required' });
+        
+        await pool.query(
+            'INSERT INTO announcements (business_id, message, created_by) VALUES ($1, $2, $3)',
+            [null, message, req.user.id]  // null = all businesses
+        );
+        res.json({ success: true, message: 'Announcement sent to all users!' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
