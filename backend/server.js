@@ -3617,9 +3617,14 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
     }
 });
 // ============================================
-// ADMIN: VERIFY PAYMENT - FIXED FOR BUSINESS UPDATE
+// ADMIN: VERIFY PAYMENT - FINAL WORKING VERSION
 // ============================================
 app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    console.log('=== VERIFY PAYMENT REQUEST ===');
+    console.log('Params:', req.params);
+    console.log('Body:', req.body);
+    console.log('User:', req.user?.id, req.user?.role);
+    
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -3627,22 +3632,25 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         const rawId = req.params.id;
         const { status } = req.body;
         
-        console.log(`🔍 Verify request - ID: "${rawId}", Status: ${status}`);
-        
-        // Validate inputs
+        // Validate payment ID
         if (!rawId || rawId === 'null' || rawId === 'undefined') {
             return res.status(400).json({ error: 'Invalid payment ID', received: rawId });
         }
         
+        // Validate status
         if (!status || !['verified', 'rejected'].includes(status)) {
             return res.status(400).json({ error: 'Status must be "verified" or "rejected"' });
         }
         
-        // Get payment using text comparison (works for both UUID and integer)
+        console.log(`Looking for payment with ID: ${rawId}`);
+        
+        // Get payment - works for both UUID and integer IDs
         const paymentResult = await client.query(
-            'SELECT * FROM subscription_payments WHERE id::text = $1',
+            'SELECT * FROM subscription_payments WHERE id::text = $1::text',
             [String(rawId)]
         );
+        
+        console.log(`Found ${paymentResult.rows.length} payment(s)`);
         
         if (paymentResult.rows.length === 0) {
             return res.status(404).json({ error: 'Payment not found', paymentId: rawId });
@@ -3650,12 +3658,12 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         
         const payment = paymentResult.rows[0];
         
-        console.log(`📄 Payment:`, {
+        console.log('Payment details:', {
             id: payment.id,
             business_id: payment.business_id,
             plan: payment.plan,
             amount: payment.amount,
-            status: payment.payment_status
+            current_status: payment.payment_status
         });
         
         // Check if already processed
@@ -3666,7 +3674,9 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             });
         }
         
-        // Update payment status - FIXED: Don't include verified_by if column type doesn't match
+        // Update payment status
+        console.log(`Updating payment status to: ${status}`);
+        
         const updateResult = await client.query(
             `UPDATE subscription_payments 
              SET payment_status = $1, 
@@ -3677,7 +3687,7 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             [status, payment.id]
         );
         
-        console.log(`✅ Payment status updated to: ${status}`);
+        console.log('Payment updated:', updateResult.rows[0]?.payment_status);
         
         // If verified, update business subscription
         if (status === 'verified') {
@@ -3685,17 +3695,12 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             nextDate.setDate(nextDate.getDate() + 30);
             const nextDateStr = nextDate.toISOString().split('T')[0];
             
-            console.log(`📅 Updating business:`, {
-                businessId: payment.business_id,
-                plan: payment.plan,
-                nextDate: nextDateStr
-            });
+            console.log(`Updating business ${payment.business_id} to plan: ${payment.plan}`);
             
-            // FIXED: Update business using text comparison for ID
             try {
                 const bizUpdate = await client.query(
                     `UPDATE businesses SET 
-                        subscription_tier = $1,
+                        subscription_tier = COALESCE($1, subscription_tier),
                         payment_status = 'paid',
                         last_payment_date = CURRENT_DATE,
                         next_payment_date = $2::date,
@@ -3708,21 +3713,19 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
                 );
                 
                 if (bizUpdate.rows.length === 0) {
-                    console.warn(`⚠️ Business #${payment.business_id} not found!`);
-                    // Don't throw error - payment is still verified
+                    console.warn(`Business ${payment.business_id} not found - payment still verified`);
                 } else {
-                    console.log(`✅ Business updated:`, bizUpdate.rows[0]);
+                    console.log('Business updated:', bizUpdate.rows[0]);
                 }
             } catch (bizError) {
-                console.error('❌ Business update error:', bizError.message);
-                // Still commit - payment verification is more important
-                console.log('⚠️ Payment verified but business update failed');
+                console.error('Business update error (non-critical):', bizError.message);
+                // Don't throw - payment verification succeeds anyway
             }
         }
         
         await client.query('COMMIT');
         
-        console.log(`🎉 Payment ${status} successfully!`);
+        console.log('=== VERIFICATION SUCCESSFUL ===');
         
         res.json({
             success: true,
@@ -3732,8 +3735,10 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('❌ Verification error:', error.message);
-        console.error('Stack:', error.stack?.split('\n')[0]);
+        console.error('=== VERIFICATION FAILED ===');
+        console.error('Error:', error.message);
+        console.error('Stack:', error.stack);
+        
         res.status(500).json({
             error: 'Verification failed',
             detail: error.message
@@ -4044,11 +4049,12 @@ app.get('/api/admin/payments', authenticate, async (req, res) => {
 
 app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
     try {
-        const id = String(req.params.id);
+        const id = req.params.id;
         const status = req.body.status;
         
+        // Cast to text for comparison (works with both int and uuid)
         const result = await pool.query(
-            'UPDATE subscription_payments SET payment_status = $1, verified_at = NOW() WHERE CAST(id AS TEXT) = $2 RETURNING *',
+            "UPDATE subscription_payments SET payment_status = $1, verified_at = NOW() WHERE id::text = $2::text RETURNING *",
             [status, id]
         );
         
@@ -4056,13 +4062,14 @@ app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Payment not found' });
         }
         
+        const payment = result.rows[0];
+        
         if (status === 'verified') {
-            const p = result.rows[0];
             const nextDate = new Date();
             nextDate.setDate(nextDate.getDate() + 30);
             await pool.query(
-                'UPDATE businesses SET subscription_tier = $1, payment_status = $2, last_payment_date = CURRENT_DATE, next_payment_date = $3 WHERE id = $4',
-                [p.plan, 'paid', nextDate.toISOString().split('T')[0], p.business_id]
+                "UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3",
+                [payment.plan, nextDate.toISOString().split('T')[0], payment.business_id]
             );
         }
         
