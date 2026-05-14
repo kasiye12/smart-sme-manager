@@ -3478,6 +3478,172 @@ app.post('/api/business/upgrade', authenticate, async (req, res) => {
 });
 
 // ============================================
+// SUBSCRIPTION PAYMENT SYSTEM
+// ============================================
+
+// Submit payment (User side)
+app.post('/api/subscription/pay', authenticate, async (req, res) => {
+    try {
+        const { plan, amount, payment_method, transaction_ref, notes } = req.body;
+        const businessId = req.user.business_id;
+        
+        if (!plan || !amount) {
+            return res.status(400).json({ error: 'Plan and amount required' });
+        }
+        
+        // Create payment record
+        const result = await pool.query(
+            `INSERT INTO subscription_payments (business_id, plan, amount, payment_method, transaction_ref, notes)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+            [businessId, plan, amount, payment_method || 'manual', transaction_ref, notes]
+        );
+        
+        // Update business payment status
+        await pool.query(
+            'UPDATE businesses SET payment_status = $1, updated_at = NOW() WHERE id = $2',
+            ['pending', businessId]
+        );
+        
+        res.status(201).json({ 
+            success: true, 
+            payment: result.rows[0],
+            message: 'Payment submitted! Waiting for verification.'
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get payment history (User side)
+app.get('/api/subscription/payments', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM subscription_payments WHERE business_id = $1 ORDER BY created_at DESC LIMIT 20',
+            [req.user.business_id]
+        );
+        res.json({ payments: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get payment status (User side)
+app.get('/api/subscription/my-status', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT subscription_tier, payment_status, last_payment_date, next_payment_date,
+                    (SELECT COALESCE(SUM(amount), 0) FROM subscription_payments WHERE business_id = $1 AND payment_status = 'verified') as total_paid
+             FROM businesses WHERE id = $1`,
+            [req.user.business_id]
+        );
+        
+        const biz = result.rows[0];
+        res.json({
+            plan: biz.subscription_tier,
+            payment_status: biz.payment_status,
+            last_payment: biz.last_payment_date,
+            next_payment: biz.next_payment_date,
+            total_paid: parseFloat(biz.total_paid)
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Verify payment (Admin side)
+app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body; // 'verified' or 'rejected'
+        
+        const payment = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
+        if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
+        
+        await pool.query(
+            'UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
+            [status, req.user.id, id]
+        );
+        
+        if (status === 'verified') {
+            const p = payment.rows[0];
+            const nextDate = new Date();
+            nextDate.setDate(nextDate.getDate() + 30);
+            
+            await pool.query(
+                `UPDATE businesses SET 
+                    subscription_tier = $1,
+                    payment_status = 'paid',
+                    last_payment_date = CURRENT_DATE,
+                    next_payment_date = $2,
+                    updated_at = NOW()
+                 WHERE id = $3`,
+                [p.plan, nextDate.toISOString().split('T')[0], p.business_id]
+            );
+        }
+        
+        res.json({ success: true, message: `Payment ${status}` });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get all payments (Admin side)
+app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { status } = req.query;
+        let query = `
+            SELECT sp.*, b.name as business_name, b.owner_name, b.phone
+            FROM subscription_payments sp
+            JOIN businesses b ON sp.business_id = b.id
+            WHERE 1=1
+        `;
+        const params = [];
+        
+        if (status) {
+            params.push(status);
+            query += ` AND sp.payment_status = $${params.length}`;
+        }
+        
+        query += ` ORDER BY sp.created_at DESC LIMIT 50`;
+        
+        const result = await pool.query(query, params);
+        res.json({ payments: result.rows });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Telebirr/CBE Payment Instructions
+app.get('/api/payment-methods', authenticate, async (req, res) => {
+    res.json({
+        methods: [
+            {
+                name: 'Telebirr',
+                account: '0945305180',
+                merchant_id: 'TB20240001',
+                instructions: 'Send to Telebirr account and submit transaction reference'
+            },
+            {
+                name: 'CBE Birr',
+                account: '0945305180',
+                short_code: '*847#',
+                instructions: 'Dial *847# → Send Money → Enter 0945305180'
+            },
+            {
+                name: 'Bank Transfer',
+                bank: 'Commercial Bank of Ethiopia',
+                account_number: '1000234567890',
+                account_name: 'Kassie Taye',
+                instructions: 'Transfer and upload receipt image'
+            },
+            {
+                name: 'Cash Payment',
+                instructions: 'Pay in person at our office'
+            }
+        ]
+    });
+});
+// ============================================
 // SUBSCRIPTION MANAGEMENT
 // ============================================
 
