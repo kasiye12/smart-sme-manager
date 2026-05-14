@@ -3531,7 +3531,6 @@ app.put('/api/admin/notifications/read-all', authenticate, authorize('owner', 'a
     }
 });
 
-// Get all payments for admin verification
 app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const { status } = req.query;
@@ -3542,19 +3541,11 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
             WHERE 1=1
         `;
         const params = [];
-        
-        if (status) {
-            params.push(status);
-            query += ` AND sp.payment_status = $${params.length}`;
-        }
-        
+        if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
-        
         const result = await pool.query(query, params);
         res.json({ payments: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // Verify or reject payment
@@ -3797,6 +3788,61 @@ app.put('/api/admin/subscriptions/:businessId/unlock', authenticate, async (req,
             [req.params.businessId]
         );
         res.json({ success: true, message: 'Account unlocked for 30 days' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ============================================
+// ADMIN PAYMENTS
+// ============================================
+app.get('/api/admin/payments', authenticate, async (req, res) => {
+    try {
+        const { status } = req.query;
+        let query = `
+            SELECT sp.*, b.name as business_name, b.owner_name, b.phone
+            FROM subscription_payments sp
+            JOIN businesses b ON sp.business_id = b.id
+            WHERE 1=1
+        `;
+        const params = [];
+        if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
+        query += ` ORDER BY sp.created_at DESC LIMIT 50`;
+        const result = await pool.query(query, params);
+        res.json({ payments: result.rows });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+        
+        await pool.query('UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
+            [status, req.user.id, id]);
+        
+        if (status === 'verified') {
+            const payment = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
+            if (payment.rows.length > 0) {
+                const p = payment.rows[0];
+                const nextDate = new Date(); nextDate.setDate(nextDate.getDate() + 30);
+                await pool.query(`UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3`,
+                    [p.plan, nextDate.toISOString().split('T')[0], p.business_id]);
+            }
+        }
+        res.json({ success: true, message: `Payment ${status}` });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/api/admin/notifications', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM admin_notifications WHERE is_read = false ORDER BY created_at DESC LIMIT 20');
+        res.json({ notifications: result.rows, unread_count: result.rows.length });
+    } catch (error) { res.json({ notifications: [], unread_count: 0 }); }
+});
+
+app.put('/api/admin/notifications/read-all', authenticate, async (req, res) => {
+    try {
+        await pool.query('UPDATE admin_notifications SET is_read = true WHERE is_read = false');
+        res.json({ success: true });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
