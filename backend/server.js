@@ -4074,12 +4074,11 @@ app.get('/api/admin/payments', authenticate, async (req, res) => {
 
 app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
     try {
-        const id = req.params.id;
+        const id = String(req.params.id);
         const status = req.body.status;
         
-        // Cast to text for comparison (works with both int and uuid)
         const result = await pool.query(
-            "UPDATE subscription_payments SET payment_status = $1, verified_at = NOW() WHERE id::text = $2::text RETURNING *",
+            'UPDATE subscription_payments SET payment_status = $1, verified_at = NOW() WHERE CAST(id AS TEXT) = $2 RETURNING *',
             [status, id]
         );
         
@@ -4087,14 +4086,13 @@ app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Payment not found' });
         }
         
-        const payment = result.rows[0];
-        
         if (status === 'verified') {
+            const p = result.rows[0];
             const nextDate = new Date();
             nextDate.setDate(nextDate.getDate() + 30);
             await pool.query(
-                "UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3",
-                [payment.plan, nextDate.toISOString().split('T')[0], payment.business_id]
+                'UPDATE businesses SET subscription_tier = $1, payment_status = $2, last_payment_date = CURRENT_DATE, next_payment_date = $3 WHERE id = $4',
+                [p.plan, 'paid', nextDate.toISOString().split('T')[0], p.business_id]
             );
         }
         
