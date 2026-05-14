@@ -3389,9 +3389,14 @@ app.post('/api/business/upgrade', authenticate, async (req, res) => {
 // SUBSCRIPTION PAYMENT SYSTEM
 // ============================================
 
-// Submit payment (User side) - WITH NOTIFICATION
+// ============================================
+// SUBSCRIPTION PAYMENT WITH NOTIFICATION (FIXED)
+// ============================================
 app.post('/api/subscription/pay', authenticate, async (req, res) => {
+    const client = await pool.connect();
     try {
+        await client.query('BEGIN');
+        
         const { plan, amount, payment_method, transaction_ref, notes } = req.body;
         const businessId = req.user.business_id;
         
@@ -3399,41 +3404,68 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Plan and amount required' });
         }
         
-        // Get business info
-        const business = await pool.query('SELECT name, owner_name, phone FROM businesses WHERE id = $1', [businessId]);
-        const bizName = business.rows[0]?.name || 'Unknown';
-        const ownerName = business.rows[0]?.owner_name || 'Unknown';
-        const ownerPhone = business.rows[0]?.phone || 'Unknown';
+        // Validate plan
+        const validPlans = ['free', 'starter', 'business', 'enterprise'];
+        if (!validPlans.includes(plan)) {
+            return res.status(400).json({ error: 'Invalid plan. Valid plans: free, starter, business, enterprise' });
+        }
         
-        // Create payment record
-        const result = await pool.query(
-            `INSERT INTO subscription_payments (business_id, plan, amount, payment_method, transaction_ref, notes)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-            [businessId, plan, amount, payment_method || 'manual', transaction_ref, notes]
+        // Get business info
+        const business = await client.query(
+            'SELECT name, owner_name, phone, subscription_tier FROM businesses WHERE id = $1', 
+            [businessId]
         );
         
+        if (business.rows.length === 0) {
+            return res.status(404).json({ error: 'Business not found' });
+        }
+        
+        const bizName = business.rows[0].name || 'Unknown';
+        const ownerName = business.rows[0].owner_name || 'Unknown';
+        const ownerPhone = business.rows[0].phone || 'Unknown';
+        
+        // Create payment record
+        const result = await client.query(
+            `INSERT INTO subscription_payments (
+                business_id, plan, amount, payment_method, 
+                transaction_ref, notes, payment_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, 'pending') 
+            RETURNING *`,
+            [
+                businessId, 
+                plan, 
+                parseFloat(amount), 
+                payment_method || 'manual', 
+                transaction_ref || null, 
+                notes || null
+            ]
+        );
+        
+        const payment = result.rows[0];
+        
         // Update business payment status
-        await pool.query(
+        await client.query(
             'UPDATE businesses SET payment_status = $1, updated_at = NOW() WHERE id = $2',
             ['pending', businessId]
         );
         
         // Create notification for admin
-        await pool.query(
+        await client.query(
             `INSERT INTO admin_notifications (type, title, message, business_id, reference_id, is_read)
              VALUES ($1, $2, $3, $4, $5, false)`,
             [
                 'payment',
                 'New Payment Submission',
-                `${bizName} (${ownerName}) submitted ${amount} ETB for ${plan} plan via ${payment_method || 'manual'}. Ref: ${transaction_ref || 'N/A'}`,
+                `${bizName} (${ownerName}) submitted ${amount} ETB for ${plan.toUpperCase()} plan via ${payment_method || 'manual'}. Ref: ${transaction_ref || 'N/A'}`,
                 businessId,
-                result.rows[0].id
+                payment.id
             ]
         );
         
         // Send Telegram notification to admin if configured
         if (TELEGRAM_BOT_TOKEN && process.env.ADMIN_TELEGRAM_CHAT_ID) {
-            const telegramMsg = `
+            try {
+                const telegramMsg = `
 🔔 <b>New Payment Submitted!</b>
 
 <b>Business:</b> ${bizName}
@@ -3443,58 +3475,234 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
 <b>Amount:</b> ${amount} ETB
 <b>Method:</b> ${payment_method || 'manual'}
 <b>Reference:</b> ${transaction_ref || 'N/A'}
+${notes ? `<b>Notes:</b> ${notes}` : ''}
 
 <i>Please verify this payment in the Admin Panel.</i>
-            `;
-            await sendTelegramMessage(process.env.ADMIN_TELEGRAM_CHAT_ID, telegramMsg);
+                `;
+                await sendTelegramMessage(process.env.ADMIN_TELEGRAM_CHAT_ID, telegramMsg);
+            } catch (telegramError) {
+                console.error('Telegram notification failed:', telegramError.message);
+            }
         }
+        
+        await client.query('COMMIT');
         
         res.status(201).json({ 
             success: true, 
-            payment: result.rows[0],
-            message: 'Payment submitted! Waiting for admin verification.'
+            payment: payment,
+            message: 'Payment submitted successfully! Waiting for admin verification.'
         });
+        
     } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Subscription payment error:', error);
         res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
     }
 });
 
-// Get payment history (User side)
+// Get payment history
 app.get('/api/subscription/payments', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT * FROM subscription_payments WHERE business_id = $1 ORDER BY created_at DESC LIMIT 20',
+            `SELECT id, plan, amount, payment_method, transaction_ref, 
+                    payment_status, notes, created_at
+             FROM subscription_payments 
+             WHERE business_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 20`,
             [req.user.business_id]
         );
-        res.json({ payments: result.rows });
+        res.json({ 
+            success: true,
+            payments: result.rows 
+        });
     } catch (error) {
+        console.error('Get payments error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get payment status (User side)
+// Get my subscription status
 app.get('/api/subscription/my-status', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT subscription_tier, payment_status, last_payment_date, next_payment_date,
-                    (SELECT COALESCE(SUM(amount), 0) FROM subscription_payments WHERE business_id = $1 AND payment_status = 'verified') as total_paid
-             FROM businesses WHERE id = $1`,
+            `SELECT 
+                subscription_tier as plan,
+                payment_status,
+                last_payment_date,
+                next_payment_date,
+                subscription_end_date,
+                payment_due_date,
+                COALESCE(
+                    (SELECT SUM(amount) FROM subscription_payments 
+                     WHERE business_id = $1 AND payment_status = 'verified'), 0
+                ) as total_paid
+             FROM businesses 
+             WHERE id = $1`,
             [req.user.business_id]
         );
         
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Business not found' });
+        }
+        
         const biz = result.rows[0];
         res.json({
-            plan: biz.subscription_tier,
-            payment_status: biz.payment_status,
+            plan: biz.plan || 'free',
+            payment_status: biz.payment_status || 'pending',
             last_payment: biz.last_payment_date,
             next_payment: biz.next_payment_date,
-            total_paid: parseFloat(biz.total_paid)
+            total_paid: parseFloat(biz.total_paid) || 0
         });
     } catch (error) {
+        console.error('Get status error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// Admin: Get all payments
+app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    try {
+        const { status } = req.query;
+        let query = `
+            SELECT 
+                sp.id, sp.plan, sp.amount, sp.payment_method, 
+                sp.transaction_ref, sp.payment_status, sp.notes,
+                sp.created_at, sp.verified_at,
+                b.id as business_id, b.name as business_name, 
+                b.owner_name, b.phone
+            FROM subscription_payments sp
+            JOIN businesses b ON sp.business_id = b.id
+            WHERE 1=1
+        `;
+        const params = [];
+        
+        if (status) {
+            params.push(status);
+            query += ` AND sp.payment_status = $${params.length}`;
+        }
+        
+        query += ` ORDER BY sp.created_at DESC LIMIT 50`;
+        
+        const result = await pool.query(query, params);
+        res.json({ 
+            success: true,
+            payments: result.rows 
+        });
+    } catch (error) {
+        console.error('Get admin payments error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Admin: Verify or reject payment
+app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        const { id } = req.params;
+        const { status } = req.body; // 'verified' or 'rejected'
+        
+        if (!['verified', 'rejected'].includes(status)) {
+            return res.status(400).json({ error: 'Status must be verified or rejected' });
+        }
+        
+        // Get payment details
+        const payment = await client.query(
+            'SELECT * FROM subscription_payments WHERE id = $1', 
+            [id]
+        );
+        
+        if (payment.rows.length === 0) {
+            return res.status(404).json({ error: 'Payment not found' });
+        }
+        
+        const p = payment.rows[0];
+        
+        // Update payment status
+        await client.query(
+            `UPDATE subscription_payments 
+             SET payment_status = $1, verified_by = $2, verified_at = NOW() 
+             WHERE id = $3`,
+            [status, req.user.id, id]
+        );
+        
+        if (status === 'verified') {
+            // Calculate next payment date (30 days from now)
+            const nextDate = new Date();
+            nextDate.setDate(nextDate.getDate() + 30);
+            
+            // Update business subscription
+            await client.query(
+                `UPDATE businesses SET 
+                    subscription_tier = $1,
+                    payment_status = 'paid',
+                    last_payment_date = CURRENT_DATE,
+                    next_payment_date = $2,
+                    payment_due_date = $2,
+                    subscription_end_date = $2,
+                    updated_at = NOW()
+                 WHERE id = $3`,
+                [p.plan, nextDate.toISOString().split('T')[0], p.business_id]
+            );
+            
+            // Notify the business owner via Telegram
+            const business = await client.query(
+                'SELECT phone, name FROM businesses WHERE id = $1', 
+                [p.business_id]
+            );
+            
+            if (business.rows[0]?.phone && TELEGRAM_BOT_TOKEN) {
+                try {
+                    const customer = await client.query(
+                        'SELECT telegram_chat_id FROM customers WHERE phone = $1 LIMIT 1', 
+                        [business.rows[0].phone]
+                    );
+                    
+                    if (customer.rows[0]?.telegram_chat_id) {
+                        const message = `
+✅ <b>Payment Verified!</b>
+
+Dear ${business.rows[0].name},
+
+Your <b>${p.plan.toUpperCase()}</b> plan has been activated successfully!
+
+<b>Amount Paid:</b> ${p.amount} ETB
+<b>Valid Until:</b> ${nextDate.toISOString().split('T')[0]}
+<b>Transaction Ref:</b> ${p.transaction_ref || 'N/A'}
+
+Thank you for your payment! 🙏
+
+<i>Smart SME Manager</i>
+                        `;
+                        await sendTelegramMessage(customer.rows[0].telegram_chat_id, message);
+                    }
+                } catch (telegramError) {
+                    console.error('Telegram notification failed:', telegramError.message);
+                }
+            }
+        }
+        
+        await client.query('COMMIT');
+        
+        res.json({ 
+            success: true, 
+            message: `Payment ${status} successfully`,
+            payment_id: parseInt(id),
+            status: status
+        });
+        
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Verify payment error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
 // ============================================
 // ADMIN NOTIFICATIONS
 // ============================================
