@@ -4021,17 +4021,12 @@ app.put('/api/admin/subscriptions/:businessId/unlock', authenticate, async (req,
 });
 
 // ============================================
-// ADMIN PAYMENTS
+// ADMIN PAYMENTS & NOTIFICATIONS
 // ============================================
 app.get('/api/admin/payments', authenticate, async (req, res) => {
     try {
         const { status } = req.query;
-        let query = `
-            SELECT sp.*, b.name as business_name, b.owner_name, b.phone
-            FROM subscription_payments sp
-            JOIN businesses b ON sp.business_id = b.id
-            WHERE 1=1
-        `;
+        let query = `SELECT sp.*, b.name as business_name, b.owner_name, b.phone FROM subscription_payments sp JOIN businesses b ON sp.business_id = b.id WHERE 1=1`;
         const params = [];
         if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
@@ -4044,17 +4039,12 @@ app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
         const { status } = req.body;
-        
-        await pool.query('UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
-            [status, req.user.id, id]);
-        
+        await pool.query('UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3', [status, req.user.id, id]);
         if (status === 'verified') {
-            const payment = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
-            if (payment.rows.length > 0) {
-                const p = payment.rows[0];
+            const p = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
+            if (p.rows.length > 0) {
                 const nextDate = new Date(); nextDate.setDate(nextDate.getDate() + 30);
-                await pool.query(`UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3`,
-                    [p.plan, nextDate.toISOString().split('T')[0], p.business_id]);
+                await pool.query(`UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3`, [p.rows[0].plan, nextDate.toISOString().split('T')[0], p.rows[0].business_id]);
             }
         }
         res.json({ success: true, message: `Payment ${status}` });
@@ -4069,20 +4059,8 @@ app.get('/api/admin/notifications', authenticate, async (req, res) => {
 });
 
 app.put('/api/admin/notifications/read-all', authenticate, async (req, res) => {
-    try {
-        await pool.query('UPDATE admin_notifications SET is_read = true WHERE is_read = false');
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// ✅ 3. SENTRY ERROR HANDLER - MUST BE AFTER ALL ROUTES, BEFORE app.listen
-//app.use(Sentry.Handlers.errorHandler());
-
-// ============================================
-// 404 HANDLER
-// ============================================
-app.use((req, res) => {
-    res.status(404).json({ error: 'Route not found', path: req.originalUrl, method: req.method });
+    try { await pool.query('UPDATE admin_notifications SET is_read = true WHERE is_read = false'); res.json({ success: true }); }
+    catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ============================================
