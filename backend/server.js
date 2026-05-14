@@ -3454,6 +3454,19 @@ app.post('/api/announcements', authenticate, async (req, res) => {
     }
 });
 
+app.post('/api/business/upgrade', authenticate, async (req, res) => {
+    try {
+        const { plan } = req.body;
+        const validPlans = ['free', 'basic', 'premium', 'enterprise'];
+        if (!validPlans.includes(plan)) return res.status(400).json({ error: 'Invalid plan' });
+        
+        await pool.query('UPDATE businesses SET subscription_tier = $1, updated_at = NOW() WHERE id = $2', 
+            [plan, req.user.business_id]);
+        
+        res.json({ success: true, message: `Upgraded to ${plan} plan` });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 // ============================================
 // SUBSCRIPTION MANAGEMENT
 // ============================================
