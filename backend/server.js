@@ -3386,10 +3386,6 @@ app.post('/api/business/upgrade', authenticate, async (req, res) => {
 });
 
 // ============================================
-// SUBSCRIPTION PAYMENT SYSTEM
-// ============================================
-
-// ============================================
 // SUBSCRIPTION PAYMENT WITH NOTIFICATION (FIXED)
 // ============================================
 app.post('/api/subscription/pay', authenticate, async (req, res) => {
@@ -3404,15 +3400,21 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Plan and amount required' });
         }
         
-        // Validate plan
+        // Validate and convert types
         const validPlans = ['free', 'starter', 'business', 'enterprise'];
         if (!validPlans.includes(plan)) {
-            return res.status(400).json({ error: 'Invalid plan. Valid plans: free, starter, business, enterprise' });
+            return res.status(400).json({ error: 'Invalid plan' });
+        }
+        
+        // Ensure amount is a number
+        const amountNum = parseFloat(amount);
+        if (isNaN(amountNum) || amountNum <= 0) {
+            return res.status(400).json({ error: 'Invalid amount' });
         }
         
         // Get business info
         const business = await client.query(
-            'SELECT name, owner_name, phone, subscription_tier FROM businesses WHERE id = $1', 
+            'SELECT name, owner_name, phone FROM businesses WHERE id = $1', 
             [businessId]
         );
         
@@ -3424,20 +3426,30 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
         const ownerName = business.rows[0].owner_name || 'Unknown';
         const ownerPhone = business.rows[0].phone || 'Unknown';
         
-        // Create payment record
+        // CRITICAL FIX: Ensure all values have consistent types
+        const paymentMethod = payment_method || 'manual';
+        const transactionRef = transaction_ref || null;
+        const paymentNotes = notes || null;
+        
+        // Create payment record with explicit type casting
         const result = await client.query(
             `INSERT INTO subscription_payments (
-                business_id, plan, amount, payment_method, 
-                transaction_ref, notes, payment_status
+                business_id, 
+                plan, 
+                amount, 
+                payment_method, 
+                transaction_ref, 
+                notes, 
+                payment_status
             ) VALUES ($1, $2, $3, $4, $5, $6, 'pending') 
             RETURNING *`,
             [
-                businessId, 
-                plan, 
-                parseFloat(amount), 
-                payment_method || 'manual', 
-                transaction_ref || null, 
-                notes || null
+                parseInt(businessId),           // $1 - INTEGER
+                String(plan),                   // $2 - VARCHAR (was causing the error!)
+                amountNum,                      // $3 - DECIMAL
+                String(paymentMethod),          // $4 - VARCHAR
+                transactionRef,                 // $5 - VARCHAR (nullable)
+                paymentNotes                    // $6 - TEXT (nullable)
             ]
         );
         
@@ -3446,19 +3458,21 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
         // Update business payment status
         await client.query(
             'UPDATE businesses SET payment_status = $1, updated_at = NOW() WHERE id = $2',
-            ['pending', businessId]
+            ['pending', parseInt(businessId)]
         );
         
         // Create notification for admin
+        const notificationMessage = `${bizName} (${ownerName}) submitted ${amountNum} ETB for ${plan.toUpperCase()} plan via ${paymentMethod}. Ref: ${transactionRef || 'N/A'}`;
+        
         await client.query(
             `INSERT INTO admin_notifications (type, title, message, business_id, reference_id, is_read)
              VALUES ($1, $2, $3, $4, $5, false)`,
             [
-                'payment',
-                'New Payment Submission',
-                `${bizName} (${ownerName}) submitted ${amount} ETB for ${plan.toUpperCase()} plan via ${payment_method || 'manual'}. Ref: ${transaction_ref || 'N/A'}`,
-                businessId,
-                payment.id
+                'payment',                      // $1 - VARCHAR
+                'New Payment Submission',       // $2 - VARCHAR
+                notificationMessage,            // $3 - TEXT
+                parseInt(businessId),           // $4 - INTEGER
+                parseInt(payment.id)            // $5 - INTEGER
             ]
         );
         
@@ -3472,10 +3486,10 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
 <b>Owner:</b> ${ownerName}
 <b>Phone:</b> ${ownerPhone}
 <b>Plan:</b> ${plan.toUpperCase()}
-<b>Amount:</b> ${amount} ETB
-<b>Method:</b> ${payment_method || 'manual'}
-<b>Reference:</b> ${transaction_ref || 'N/A'}
-${notes ? `<b>Notes:</b> ${notes}` : ''}
+<b>Amount:</b> ${amountNum} ETB
+<b>Method:</b> ${paymentMethod}
+<b>Reference:</b> ${transactionRef || 'N/A'}
+${paymentNotes ? `<b>Notes:</b> ${paymentNotes}` : ''}
 
 <i>Please verify this payment in the Admin Panel.</i>
                 `;
@@ -3496,7 +3510,10 @@ ${notes ? `<b>Notes:</b> ${notes}` : ''}
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Subscription payment error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: 'Payment submission failed', 
+            detail: error.message 
+        });
     } finally {
         client.release();
     }
@@ -3562,50 +3579,73 @@ app.get('/api/subscription/my-status', authenticate, async (req, res) => {
     }
 });
 
-// Admin: Get all payments
+// ============================================
+// ADMIN: GET ALL PAYMENTS (FIXED)
+// ============================================
 app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const { status } = req.query;
+        
         let query = `
             SELECT 
-                sp.id, sp.plan, sp.amount, sp.payment_method, 
-                sp.transaction_ref, sp.payment_status, sp.notes,
-                sp.created_at, sp.verified_at,
-                b.id as business_id, b.name as business_name, 
-                b.owner_name, b.phone
+                sp.id, 
+                sp.plan, 
+                sp.amount, 
+                sp.payment_method, 
+                sp.transaction_ref, 
+                sp.payment_status, 
+                sp.notes,
+                sp.created_at, 
+                sp.verified_at,
+                b.id as business_id, 
+                b.name as business_name, 
+                b.owner_name, 
+                b.phone
             FROM subscription_payments sp
             JOIN businesses b ON sp.business_id = b.id
-            WHERE 1=1
         `;
+        
         const params = [];
         
-        if (status) {
-            params.push(status);
-            query += ` AND sp.payment_status = $${params.length}`;
+        if (status && ['pending', 'verified', 'rejected'].includes(status)) {
+            query += ` WHERE sp.payment_status = $1`;
+            params.push(String(status)); // Ensure VARCHAR type
         }
         
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
         
         const result = await pool.query(query, params);
+        
+        // Convert numeric types for JSON response
+        const payments = result.rows.map(p => ({
+            ...p,
+            id: parseInt(p.id),
+            amount: parseFloat(p.amount),
+            business_id: parseInt(p.business_id)
+        }));
+        
         res.json({ 
             success: true,
-            payments: result.rows 
+            payments: payments 
         });
+        
     } catch (error) {
         console.error('Get admin payments error:', error);
         res.status(500).json({ error: error.message });
     }
 });
-
-// Admin: Verify or reject payment
+// ============================================
+// ADMIN: VERIFY OR REJECT PAYMENT (FIXED)
+// ============================================
 app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
         const { id } = req.params;
-        const { status } = req.body; // 'verified' or 'rejected'
+        const { status } = req.body;
         
+        // Validate status
         if (!['verified', 'rejected'].includes(status)) {
             return res.status(400).json({ error: 'Status must be verified or rejected' });
         }
@@ -3613,7 +3653,7 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         // Get payment details
         const payment = await client.query(
             'SELECT * FROM subscription_payments WHERE id = $1', 
-            [id]
+            [parseInt(id)]  // Ensure INTEGER type
         );
         
         if (payment.rows.length === 0) {
@@ -3625,15 +3665,22 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         // Update payment status
         await client.query(
             `UPDATE subscription_payments 
-             SET payment_status = $1, verified_by = $2, verified_at = NOW() 
+             SET payment_status = $1, 
+                 verified_by = $2, 
+                 verified_at = NOW(),
+                 updated_at = NOW()
              WHERE id = $3`,
-            [status, req.user.id, id]
+            [
+                String(status),        // $1 - VARCHAR
+                parseInt(req.user.id), // $2 - INTEGER
+                parseInt(id)           // $3 - INTEGER
+            ]
         );
         
         if (status === 'verified') {
-            // Calculate next payment date (30 days from now)
             const nextDate = new Date();
             nextDate.setDate(nextDate.getDate() + 30);
+            const nextDateStr = nextDate.toISOString().split('T')[0];
             
             // Update business subscription
             await client.query(
@@ -3646,39 +3693,33 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
                     subscription_end_date = $2,
                     updated_at = NOW()
                  WHERE id = $3`,
-                [p.plan, nextDate.toISOString().split('T')[0], p.business_id]
+                [
+                    String(p.plan),     // $1 - VARCHAR
+                    nextDateStr,        // $2 - DATE
+                    parseInt(p.business_id) // $3 - INTEGER
+                ]
             );
             
-            // Notify the business owner via Telegram
-            const business = await client.query(
-                'SELECT phone, name FROM businesses WHERE id = $1', 
-                [p.business_id]
-            );
-            
-            if (business.rows[0]?.phone && TELEGRAM_BOT_TOKEN) {
+            // Notify business owner via Telegram
+            if (TELEGRAM_BOT_TOKEN) {
                 try {
-                    const customer = await client.query(
-                        'SELECT telegram_chat_id FROM customers WHERE phone = $1 LIMIT 1', 
-                        [business.rows[0].phone]
+                    const business = await client.query(
+                        'SELECT phone, name FROM businesses WHERE id = $1', 
+                        [parseInt(p.business_id)]
                     );
                     
-                    if (customer.rows[0]?.telegram_chat_id) {
-                        const message = `
-✅ <b>Payment Verified!</b>
-
-Dear ${business.rows[0].name},
-
-Your <b>${p.plan.toUpperCase()}</b> plan has been activated successfully!
-
-<b>Amount Paid:</b> ${p.amount} ETB
-<b>Valid Until:</b> ${nextDate.toISOString().split('T')[0]}
-<b>Transaction Ref:</b> ${p.transaction_ref || 'N/A'}
-
-Thank you for your payment! 🙏
-
-<i>Smart SME Manager</i>
-                        `;
-                        await sendTelegramMessage(customer.rows[0].telegram_chat_id, message);
+                    if (business.rows[0]?.phone) {
+                        const customer = await client.query(
+                            'SELECT telegram_chat_id FROM customers WHERE phone = $1 LIMIT 1', 
+                            [String(business.rows[0].phone)]
+                        );
+                        
+                        if (customer.rows[0]?.telegram_chat_id) {
+                            await sendTelegramMessage(
+                                String(customer.rows[0].telegram_chat_id),
+                                `✅ <b>Payment Verified!</b>\n\nYour ${String(p.plan).toUpperCase()} plan has been activated.\nAmount: ${parseFloat(p.amount)} ETB\nValid until: ${nextDateStr}\n\nThank you! 🙏`
+                            );
+                        }
                     }
                 } catch (telegramError) {
                     console.error('Telegram notification failed:', telegramError.message);
@@ -3698,7 +3739,10 @@ Thank you for your payment! 🙏
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('Verify payment error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: 'Verification failed', 
+            detail: error.message 
+        });
     } finally {
         client.release();
     }
@@ -3739,22 +3783,6 @@ app.put('/api/admin/notifications/read-all', authenticate, authorize('owner', 'a
     }
 });
 
-app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
-    try {
-        const { status } = req.query;
-        let query = `
-            SELECT sp.*, b.name as business_name, b.owner_name, b.phone
-            FROM subscription_payments sp
-            JOIN businesses b ON sp.business_id = b.id
-            WHERE 1=1
-        `;
-        const params = [];
-        if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
-        query += ` ORDER BY sp.created_at DESC LIMIT 50`;
-        const result = await pool.query(query, params);
-        res.json({ payments: result.rows });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
 
 // Verify or reject payment
 app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
