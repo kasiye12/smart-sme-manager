@@ -39,7 +39,8 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 // Database connection
 const pool = new Pool({
@@ -77,36 +78,30 @@ app.get('/', (req, res) => {
 function getEthiopianDate() {
     const now = new Date();
     const year = now.getFullYear();
-    const month = now.getMonth() + 1; // JavaScript months are 0-indexed
+    const month = now.getMonth() + 1;
     const day = now.getDate();
     
     let ethYear, ethMonth, ethDay;
     
-    // Ethiopian New Year is September 11 (or 12 in leap years)
     if (month > 9 || (month === 9 && day >= 11)) {
-        // After Ethiopian New Year
-        ethYear = year - 8; // Fixed: Ethiopian year is 7-8 years behind Gregorian
-        ethMonth = month - 8; // September becomes month 1, October month 2, etc.
-        ethDay = day - 10; // Adjust for New Year offset
+        ethYear = year - 8;
+        ethMonth = month - 8;
+        ethDay = day - 10;
     } else {
-        // Before Ethiopian New Year
         ethYear = year - 7;
-        ethMonth = month + 4; // January becomes month 5, February month 6, etc.
+        ethMonth = month + 4;
         ethDay = day;
     }
     
-    // Handle day underflow for early September
     if (ethDay <= 0) {
         ethMonth--;
         if (ethMonth <= 0) {
-            ethMonth = 13; // Pagume
+            ethMonth = 13;
             ethYear--;
         }
-        // Add days from previous month (all Ethiopian months have 30 days)
         ethDay = 30 + ethDay;
     }
     
-    // Ensure months don't exceed 13
     if (ethMonth > 13) {
         ethMonth -= 13;
         ethYear++;
@@ -115,7 +110,6 @@ function getEthiopianDate() {
     const ethMonths = ['Meskerem', 'Tikimt', 'Hidar', 'Tahsas', 'Tir', 'Yekatit', 'Megabit', 'Miazia', 'Ginbot', 'Sene', 'Hamle', 'Nehase', 'Pagume'];
     const ethMonthsAm = ['መስከረም', 'ጥቅምት', 'ህዳር', 'ታህሳስ', 'ጥር', 'የካቲት', 'መጋቢት', 'ሚያዚያ', 'ግንቦት', 'ሰኔ', 'ሐምሌ', 'ነሐሴ', 'ጳጉሜ'];
     
-    // Clamp month index to valid range
     const monthIndex = Math.max(0, Math.min(12, ethMonth - 1));
     
     return {
@@ -154,10 +148,7 @@ async function sendTelegramMessage(chatId, message, parseMode = 'HTML') {
 
 async function sendTelegramKeyboard(chatId, message, buttons, parseMode = 'HTML') {
     try {
-        const keyboard = {
-            inline_keyboard: buttons
-        };
-        
+        const keyboard = { inline_keyboard: buttons };
         const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -189,8 +180,6 @@ async function sendWhatsAppMessage(to, message) {
             formattedTo = '251' + formattedTo;
         }
         
-        console.log(`📱 Sending WhatsApp to: ${formattedTo}`);
-        
         const response = await fetch(
             `https://graph.facebook.com/${META_API_VERSION}/${META_PHONE_NUMBER_ID}/messages`,
             {
@@ -204,24 +193,17 @@ async function sendWhatsAppMessage(to, message) {
                     recipient_type: 'individual',
                     to: formattedTo,
                     type: 'text',
-                    text: { 
-                        preview_url: false, 
-                        body: message 
-                    }
+                    text: { preview_url: false, body: message }
                 })
             }
         );
         
         const result = await response.json();
-        
         if (result.error) {
             console.error('Meta API Error:', result.error);
             return { success: false, error: result.error.message };
         }
-        
-        console.log('✅ WhatsApp sent:', result.messages?.[0]?.id);
         return { success: true, messageId: result.messages?.[0]?.id };
-        
     } catch (error) {
         console.error('WhatsApp send error:', error);
         return { success: false, error: error.message };
@@ -981,18 +963,9 @@ app.get('/api/reports/daily', authenticate, async (req, res) => {
         console.error('Daily report error:', error);
         res.status(500).json({ 
             error: error.message,
-            total_sales: 0, 
-            total_revenue: 0, 
-            total_tax: 0, 
-            gross_profit: 0, 
-            unique_customers: 0,
-            net_profit: 0,
-            total_expenses: 0,
-            cash_sales: 0,
-            electronic_sales: 0,
-            credit_sales: 0,
-            other_sales: 0,
-            revenue_growth: 0
+            total_sales: 0, total_revenue: 0, total_tax: 0, gross_profit: 0, 
+            unique_customers: 0, net_profit: 0, total_expenses: 0,
+            cash_sales: 0, electronic_sales: 0, credit_sales: 0, other_sales: 0, revenue_growth: 0
         });
     }
 });
@@ -1005,10 +978,7 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
         
         let prevMonth = targetMonth - 1;
         let prevYear = targetYear;
-        if (prevMonth === 0) {
-            prevMonth = 12;
-            prevYear = targetYear - 1;
-        }
+        if (prevMonth === 0) { prevMonth = 12; prevYear = targetYear - 1; }
         
         const salesResult = await pool.query(`
             SELECT 
@@ -1075,18 +1045,14 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
         const revenueGrowth = prevRevenue > 0 ? ((parseFloat(sales.total_revenue) - prevRevenue) / prevRevenue) * 100 : 0;
         
         res.json({
-            period: 'monthly',
-            month: parseInt(targetMonth),
-            year: parseInt(targetYear),
+            period: 'monthly', month: parseInt(targetMonth), year: parseInt(targetYear),
             total_sales: parseInt(sales.total_sales) || 0,
             total_revenue: parseFloat(sales.total_revenue) || 0,
             total_tax: parseFloat(sales.total_tax) || 0,
             total_discounts: parseFloat(sales.total_discounts) || 0,
             unique_customers: parseInt(sales.unique_customers) || 0,
             active_days: parseInt(sales.active_days) || 0,
-            gross_profit: grossProfit,
-            total_expenses: totalExpenses,
-            net_profit: netProfit,
+            gross_profit: grossProfit, total_expenses: totalExpenses, net_profit: netProfit,
             revenue_growth: revenueGrowth,
             cash_sales: parseFloat(paymentResult.rows[0].cash_sales) || 0,
             electronic_sales: parseFloat(paymentResult.rows[0].electronic_sales) || 0,
@@ -1096,6 +1062,38 @@ app.get('/api/reports/monthly', authenticate, authorize('owner', 'manager'), asy
     } catch (error) { 
         console.error('Monthly report error:', error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/reports/summary', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const thisMonth = new Date().getMonth() + 1;
+        const thisYear = new Date().getFullYear();
+        
+        const todayResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+        `, [req.user.business_id, today]);
+        
+        const monthResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 
+            AND EXTRACT(MONTH FROM sale_date) = $2 AND EXTRACT(YEAR FROM sale_date) = $3 AND status = 'completed'
+        `, [req.user.business_id, thisMonth, thisYear]);
+        
+        const totalResult = await pool.query(`
+            SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as revenue 
+            FROM sales WHERE business_id = $1 AND status = 'completed'
+        `, [req.user.business_id]);
+        
+        res.json({ 
+            today: todayResult.rows[0],
+            this_month: monthResult.rows[0],
+            all_time: totalResult.rows[0] 
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
     }
 });
 
@@ -1130,6 +1128,61 @@ app.post('/api/expenses', authenticate, authorize('owner', 'manager'), async (re
     }
 });
 
+app.put('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { category, amount, description } = req.body;
+        const result = await pool.query(
+            'UPDATE expenses SET category = COALESCE($1, category), amount = COALESCE($2, amount), description = COALESCE($3, description), updated_at = NOW() WHERE id = $4 AND business_id = $5 RETURNING *',
+            [category, amount, description, id, req.user.business_id]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
+        res.json({ success: true, expense: result.rows[0], message: 'Expense updated' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/expenses/:id', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query('DELETE FROM expenses WHERE id = $1 AND business_id = $2 RETURNING id', [id, req.user.business_id]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Expense not found' });
+        res.json({ success: true, message: 'Expense deleted' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ============================================
+// INVENTORY
+// ============================================
+app.post('/api/inventory/adjust', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { product_id, adjustment_type, quantity, direction, reason } = req.body;
+        if (!product_id || !quantity || !direction) return res.status(400).json({ error: 'Product, quantity, and direction required' });
+        
+        const product = await pool.query('SELECT * FROM products WHERE id = $1 AND business_id = $2', [product_id, req.user.business_id]);
+        if (product.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
+        
+        const newStock = direction === 'in' ? product.rows[0].current_stock + parseInt(quantity) : product.rows[0].current_stock - parseInt(quantity);
+        if (newStock < 0) return res.status(400).json({ error: 'Insufficient stock' });
+        
+        await pool.query('UPDATE products SET current_stock = $1, updated_at = NOW() WHERE id = $2', [newStock, product_id]);
+        await pool.query(
+            `INSERT INTO stock_adjustments (business_id, product_id, user_id, adjustment_type, quantity, direction, reason) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [req.user.business_id, product_id, req.user.id, adjustment_type || 'correction', quantity, direction, reason]
+        );
+        
+        await pool.query(
+            `INSERT INTO stock_transactions (business_id, product_id, user_id, transaction_type, quantity, notes)
+             VALUES ($1, $2, $3, 'adjustment', $4, $5)`,
+            [req.user.business_id, product_id, req.user.id, direction === 'in' ? quantity : -quantity, reason || 'Stock adjustment']
+        );
+        
+        res.json({ success: true, message: `Stock ${direction === 'in' ? 'increased' : 'decreased'} by ${quantity}`, new_stock: newStock });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
+});
+
 // ============================================
 // CASH-OUT (Z-REPORT) ENDPOINTS
 // ============================================
@@ -1142,9 +1195,53 @@ app.get('/api/cashout/status', authenticate, async (req, res) => {
         );
         
         const isClosed = result.rows.length > 0 && result.rows[0].is_closed === true;
+        res.json({ is_closed: isClosed, cashout: result.rows[0] || null });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/cashout/summary', authenticate, async (req, res) => {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        
+        const salesResult = await pool.query(`
+            SELECT 
+                COUNT(*) as total_transactions,
+                COALESCE(SUM(total_amount), 0) as total_sales,
+                COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total_amount ELSE 0 END), 0) as cash_sales,
+                COALESCE(SUM(CASE WHEN payment_method = 'credit' THEN total_amount ELSE 0 END), 0) as credit_sales,
+                COALESCE(SUM(CASE WHEN payment_method IN ('telebirr', 'cbe_birr', 'bank_transfer') THEN total_amount ELSE 0 END), 0) as electronic_sales,
+                COALESCE(SUM(tax_amount), 0) as total_tax
+            FROM sales 
+            WHERE business_id = $1 AND sale_date = $2 AND status = 'completed'
+        `, [req.user.business_id, today]);
+        
+        const expensesResult = await pool.query(`
+            SELECT COALESCE(SUM(amount), 0) as total_expenses
+            FROM expenses 
+            WHERE business_id = $1 AND expense_date = $2
+        `, [req.user.business_id, today]);
+        
+        const prevDay = new Date();
+        prevDay.setDate(prevDay.getDate() - 1);
+        const prevDayStr = prevDay.toISOString().split('T')[0];
+        
+        const prevCashout = await pool.query(
+            'SELECT actual_cash_balance FROM daily_cashouts WHERE business_id = $1 AND cashout_date = $2 AND is_closed = true',
+            [req.user.business_id, prevDayStr]
+        );
+        
+        const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
+        const expectedCashBalance = openingBalance + parseFloat(salesResult.rows[0].cash_sales) - parseFloat(expensesResult.rows[0].total_expenses);
+        
         res.json({ 
-            is_closed: isClosed,
-            cashout: result.rows[0] || null
+            summary: {
+                ...salesResult.rows[0],
+                total_expenses: parseFloat(expensesResult.rows[0].total_expenses),
+                opening_cash_balance: openingBalance,
+                expected_cash_balance: expectedCashBalance
+            }
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -1171,12 +1268,12 @@ app.post('/api/z-report/close', authenticate, async (req, res) => {
         const openingBalance = prevCashout.rows.length > 0 ? parseFloat(prevCashout.rows[0].actual_cash_balance) : 0;
         
         const cashSales = await client.query(
-            'SELECT COALESCE(SUM(total_amount), 0) as cash_total FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_method = \'cash\' AND status = \'completed\'',
+            "SELECT COALESCE(SUM(total_amount), 0) as cash_total FROM sales WHERE business_id = $1 AND sale_date = $2 AND payment_method = 'cash' AND status = 'completed'",
             [req.user.business_id, today]
         );
         
         const cashExpenses = await client.query(
-            'SELECT COALESCE(SUM(amount), 0) as expense_total FROM expenses WHERE business_id = $1 AND expense_date = $2 AND payment_method = \'cash\'',
+            "SELECT COALESCE(SUM(amount), 0) as expense_total FROM expenses WHERE business_id = $1 AND expense_date = $2 AND payment_method = 'cash'",
             [req.user.business_id, today]
         );
         
@@ -1207,8 +1304,7 @@ app.post('/api/z-report/close', authenticate, async (req, res) => {
         await client.query('COMMIT');
         
         res.json({ 
-            success: true, 
-            cashout: result.rows[0],
+            success: true, cashout: result.rows[0],
             message: status === 'short' 
                 ? `⚠️ Cash Shortage: ${Math.abs(difference)} ETB. Please check your records.` 
                 : status === 'over' 
@@ -1220,9 +1316,7 @@ app.post('/api/z-report/close', authenticate, async (req, res) => {
         await client.query('ROLLBACK');
         console.error('Z-Report error:', error);
         res.status(500).json({ error: error.message });
-    } finally {
-        client.release();
-    }
+    } finally { client.release(); }
 });
 
 // ============================================
@@ -1235,9 +1329,7 @@ app.get('/api/users', authenticate, async (req, res) => {
             [req.user.business_id]
         );
         res.json({ users: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/api/users', authenticate, authorize('owner'), async (req, res) => {
@@ -1265,9 +1357,44 @@ app.post('/api/users', authenticate, authorize('owner'), async (req, res) => {
         );
         
         res.status(201).json({ success: true, user_id: result.rows[0].id });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.put('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { full_name, phone, role, pin_code, is_active } = req.body;
+        
+        const result = await pool.query(
+            `UPDATE users SET 
+                full_name = COALESCE($1, full_name),
+                phone = COALESCE($2, phone),
+                role = COALESCE($3, role),
+                pin_code = COALESCE($4, pin_code),
+                is_active = COALESCE($5, is_active),
+                updated_at = NOW()
+             WHERE id = $6 AND business_id = $7 RETURNING id`,
+            [full_name, phone, role, pin_code, is_active, id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        res.json({ success: true, message: 'User updated successfully' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.delete('/api/users/:id', authenticate, authorize('owner'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (id === req.user.id) return res.status(400).json({ error: 'Cannot delete your own account' });
+        
+        const result = await pool.query(
+            'UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1 AND business_id = $2 RETURNING id',
+            [id, req.user.business_id]
+        );
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        res.json({ success: true, message: 'User deactivated' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ============================================
@@ -1283,44 +1410,62 @@ app.post('/api/auth/login-with-pin', async (req, res) => {
         
         const result = await pool.query(
             `SELECT u.*, b.name as business_name, b.is_active as biz_active 
-             FROM users u 
-             JOIN businesses b ON u.business_id = b.id 
+             FROM users u JOIN businesses b ON u.business_id = b.id 
              WHERE u.pin_code = $1 AND u.is_active = true AND u.role = 'cashier'`,
             [pinCode]
         );
         
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid PIN code' });
-        }
+        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid PIN code' });
         
         const user = result.rows[0];
-        if (!user.biz_active) {
-            return res.status(403).json({ error: 'Business account deactivated' });
-        }
+        if (!user.biz_active) return res.status(403).json({ error: 'Business account deactivated' });
         
         await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
         
         const token = jwt.sign(
             { id: user.id, business_id: user.business_id, role: user.role },
-            JWT_SECRET,
-            { expiresIn: '8h' }
+            JWT_SECRET, { expiresIn: '8h' }
         );
         
         res.json({ 
-            success: true, 
-            token, 
-            user: { 
-                id: user.id, 
-                name: user.full_name, 
-                business_name: user.business_name, 
-                role: user.role,
-                is_cashier: true
-            } 
+            success: true, token, 
+            user: { id: user.id, name: user.full_name, business_name: user.business_name, role: user.role, is_cashier: true } 
         });
-        
     } catch (error) {
         console.error('PIN login error:', error);
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/users/:id/set-pin', authenticate, authorize('owner', 'manager'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { pinCode } = req.body;
+        
+        if (!pinCode || pinCode.length < 4 || pinCode.length > 6) {
+            return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+        }
+        
+        const user = await pool.query('SELECT role FROM users WHERE id = $1 AND business_id = $2', [id, req.user.business_id]);
+        if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+        if (user.rows[0].role !== 'cashier') return res.status(400).json({ error: 'PIN only available for cashiers' });
+        
+        await pool.query('UPDATE users SET pin_code = $1, updated_at = NOW() WHERE id = $2', [pinCode, id]);
+        res.json({ success: true, message: 'PIN code set successfully' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ============================================
+// SMS & COMMUNICATION
+// ============================================
+app.post('/api/send-debt-reminder', authenticate, async (req, res) => {
+    try {
+        const { customerId, customerName, phone, amount, message } = req.body;
+        console.log('===== SMS REMINDER =====');
+        console.log(`To: ${phone} (${customerName}), Amount: ${amount} ETB`);
+        res.json({ success: true, message: 'SMS sent successfully (Demo mode)' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -1350,14 +1495,11 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 );
                 
                 if (customer.rows.length > 0) {
-                    const balance = parseFloat(customer.rows[0].current_balance) || 0;
                     await sendTelegramMessage(chatId, 
-                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${balance.toFixed(2)} ETB</code>\n\nThank you! 🙏`
+                        `💰 <b>Account Balance</b>\n\nDear ${customer.rows[0].full_name},\n\nYour current balance is: <code>${customer.rows[0].current_balance} ETB</code>`
                     );
                 } else {
-                    await sendTelegramMessage(chatId, 
-                        `❌ <b>Account Not Found</b>\n\nPlease scan the QR code at the shop to link your account.`
-                    );
+                    await sendTelegramMessage(chatId, '❌ <b>Account Not Found</b>\n\nPlease scan the QR code at the shop.');
                 }
             }
             return res.sendStatus(200);
@@ -1367,91 +1509,37 @@ app.post('/api/telegram-webhook', async (req, res) => {
             const chatId = message.chat.id;
             const text = message.text;
             
-            console.log(`📱 Message from ${chatId}: ${text}`);
-            
             if (text.startsWith('/start')) {
                 const parts = text.split(' ');
                 let customerId = parts.length > 1 ? parts[1] : null;
                 
                 if (customerId) {
                     const customer = await pool.query(
-                        'SELECT id, full_name, business_id, current_balance FROM customers WHERE id = $1',
-                        [customerId]
+                        'SELECT id, full_name, business_id, current_balance FROM customers WHERE id = $1', [customerId]
                     );
                     
                     if (customer.rows.length > 0) {
-                        await pool.query(
-                            'UPDATE customers SET telegram_chat_id = $1 WHERE id = $2',
-                            [chatId.toString(), customerId]
+                        await pool.query('UPDATE customers SET telegram_chat_id = $1 WHERE id = $2', [chatId.toString(), customerId]);
+                        await sendTelegramMessage(chatId, 
+                            `🎉 <b>Welcome ${customer.rows[0].full_name}!</b>\n\n✅ Connected!\n<b>Balance:</b> ${customer.rows[0].current_balance} ETB\n\n/balance - Check balance\n/help - Help`
                         );
-                        
-                        const balance = parseFloat(customer.rows[0].current_balance) || 0;
-                        
-                        const welcomeMsg = `
-🎉 <b>Welcome ${customer.rows[0].full_name}!</b>
-
-✅ Your account is now connected to Telegram!
-
-<b>Current Balance:</b> <code>${balance.toFixed(2)} ETB</code>
-
-<b>Commands:</b>
-/balance - Check your balance
-/help - Show help
-
-You will receive payment reminders here automatically.
-
-Thank you for choosing us! 🙏
-                        `;
-                        
-                        await sendTelegramMessage(chatId, welcomeMsg);
-                        res.sendStatus(200);
-                        return;
+                        return res.sendStatus(200);
                     }
                 }
-                
-                await sendTelegramMessage(chatId, `
-🤖 <b>Smart SME Manager Bot</b>
-
-Welcome! To connect your account, please ask the shop for your personalized link.
-
-Type /help for available commands.
-                `);
+                await sendTelegramMessage(chatId, '🤖 <b>Smart SME Manager Bot</b>\n\nWelcome! Type /help for commands.');
             }
             else if (text === '/balance') {
                 const customer = await pool.query(
-                    'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1',
-                    [chatId.toString()]
+                    'SELECT full_name, current_balance FROM customers WHERE telegram_chat_id = $1', [chatId.toString()]
                 );
-                
                 if (customer.rows.length > 0) {
-                    const balance = parseFloat(customer.rows[0].current_balance) || 0;
-                    await sendTelegramMessage(chatId, `
-💰 <b>Account Balance</b>
-
-Dear ${customer.rows[0].full_name},
-
-Your current balance is: <code>${balance.toFixed(2)} ETB</code>
-
-Thank you for your business! 🙏
-                    `);
+                    await sendTelegramMessage(chatId, `💰 Balance: ${customer.rows[0].current_balance} ETB`);
                 } else {
-                    await sendTelegramMessage(chatId, `
-❌ <b>Account Not Found</b>
-
-Please ask the shop to provide you with the Telegram connection link.
-                    `);
+                    await sendTelegramMessage(chatId, '❌ Account not found.');
                 }
             }
             else if (text === '/help') {
-                await sendTelegramMessage(chatId, `
-📖 <b>Available Commands</b>
-
-/start - Initialize bot
-/balance - Check your balance
-/help - Show this help
-
-<i>You will receive automatic payment reminders when you have outstanding balance.</i>
-                `);
+                await sendTelegramMessage(chatId, '📖 Commands:\n/start - Initialize\n/balance - Check balance\n/help - Help');
             }
         }
         
@@ -1462,9 +1550,23 @@ Please ask the shop to provide you with the Telegram connection link.
     }
 });
 
+app.post('/api/register-telegram', authenticate, async (req, res) => {
+    try {
+        const { customerId, telegramChatId } = req.body;
+        const customer = await pool.query('SELECT * FROM customers WHERE id = $1 AND business_id = $2', [customerId, req.user.business_id]);
+        if (customer.rows.length === 0) return res.status(404).json({ error: 'Customer not found' });
+        
+        await pool.query('UPDATE customers SET telegram_chat_id = $1 WHERE id = $2', [telegramChatId, customerId]);
+        
+        await sendTelegramMessage(telegramChatId, 
+            `🎉 <b>Welcome ${customer.rows[0].full_name}!</b>\n\n✅ Linked!\n<b>Balance:</b> ${customer.rows[0].current_balance} ETB`
+        );
+        
+        res.json({ success: true, message: 'Telegram ID registered successfully' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.post('/api/send-telegram-reminder', authenticate, async (req, res) => {
-    console.log('📨 Send reminder request received');
-    
     try {
         const { customerId, customerName, phone, amount, message, telegramChatId } = req.body;
         
@@ -1481,15 +1583,9 @@ Dear ${customerName},
 
 ${message}
 
-━━━━━━━━━━━━━━━━━
 <b>💰 Amount Due:</b> <code>${amountNum.toFixed(2)} ETB</code>
-━━━━━━━━━━━━━━━━━
 
-Please make your payment as soon as possible.
-
-Thank you for your business! 🙏
-
-📅 ${new Date().toLocaleString()}
+Please make your payment soon. Thank you! 🙏
         `;
         
         const result = await sendTelegramMessage(telegramChatId, formattedMessage);
@@ -1498,30 +1594,15 @@ Thank you for your business! 🙏
             await pool.query(
                 `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
                  VALUES ($1, $2, 'send_telegram', 'customer', $3, $4)`,
-                [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
-                    amount: amountNum, 
-                    status: 'sent'
-                })]
+                [req.user.business_id, req.user.id, customerId, JSON.stringify({ amount: amountNum, status: 'sent' })]
             );
-            
-            return res.json({ 
-                success: true, 
-                message: 'Telegram reminder sent successfully',
-                result: result
-            });
+            return res.json({ success: true, message: 'Telegram reminder sent' });
         } else {
-            return res.json({ 
-                success: false, 
-                error: result?.error || 'Failed to send Telegram message' 
-            });
+            return res.json({ success: false, error: result?.error || 'Failed to send' });
         }
-        
     } catch (error) {
-        console.error('❌ Server error:', error);
-        return res.json({ 
-            success: false, 
-            error: error.message 
-        });
+        console.error('❌ Error:', error);
+        return res.json({ success: false, error: error.message });
     }
 });
 
@@ -1532,48 +1613,22 @@ app.post('/api/send-whatsapp-reminder', authenticate, async (req, res) => {
     try {
         const { customerId, customerName, phone, amount, message } = req.body;
         
-        if (!phone) {
-            return res.status(400).json({ error: 'Customer phone number required' });
-        }
-        
+        if (!phone) return res.status(400).json({ error: 'Phone required' });
         if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
-            return res.status(500).json({ 
-                error: 'WhatsApp API not configured. Please set META_ACCESS_TOKEN and META_PHONE_NUMBER_ID.',
-                demo: true 
-            });
+            return res.status(500).json({ error: 'WhatsApp not configured', demo: true });
         }
         
-        const personalizedMessage = message
-            .replace(/{name}/g, customerName)
-            .replace(/{amount}/g, `${amount.toFixed(2)} ETB`);
-        
+        const personalizedMessage = message.replace(/{name}/g, customerName).replace(/{amount}/g, `${amount} ETB`);
         const result = await sendWhatsAppMessage(phone, personalizedMessage);
         
         await pool.query(
             `INSERT INTO action_logs (business_id, user_id, action_type, entity_type, entity_id, details)
              VALUES ($1, $2, 'send_whatsapp', 'customer', $3, $4)`,
-            [req.user.business_id, req.user.id, customerId, JSON.stringify({ 
-                phone, 
-                amount, 
-                success: result.success,
-                message_preview: personalizedMessage.substring(0, 50)
-            })]
+            [req.user.business_id, req.user.id, customerId, JSON.stringify({ phone, amount, success: result.success })]
         );
         
-        if (result.success) {
-            res.json({ 
-                success: true, 
-                message: 'WhatsApp message sent successfully',
-                messageId: result.messageId
-            });
-        } else {
-            res.json({ success: false, error: result.error });
-        }
-        
-    } catch (error) {
-        console.error('WhatsApp error:', error);
-        res.status(500).json({ error: error.message });
-    }
+        res.json({ success: result.success, message: result.success ? 'Sent' : 'Failed', error: result.error });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ============================================
@@ -1584,71 +1639,40 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
         const { plan, amount, payment_method, transaction_ref } = req.body;
         const businessId = req.user.business_id;
         
-        if (!plan || !amount) {
-            return res.status(400).json({ error: 'Plan and amount required' });
-        }
+        if (!plan || !amount) return res.status(400).json({ error: 'Plan and amount required' });
         
-        // Get business info
         const business = await pool.query('SELECT name, owner_name, phone FROM businesses WHERE id = $1', [businessId]);
         const bizName = business.rows[0]?.name || 'Unknown';
         const ownerName = business.rows[0]?.owner_name || 'Unknown';
         const ownerPhone = business.rows[0]?.phone || 'Unknown';
         
-        // Create payment record
         const result = await pool.query(
             `INSERT INTO subscription_payments (business_id, plan, amount, payment_method, transaction_ref)
              VALUES ($1, $2, $3, $4, $5) RETURNING *`,
             [businessId, plan, amount, payment_method || 'manual', transaction_ref]
         );
         
-        // Update business payment status
-        await pool.query(
-            'UPDATE businesses SET payment_status = $1, updated_at = NOW() WHERE id = $2',
-            ['pending', businessId]
-        );
+        await pool.query('UPDATE businesses SET payment_status = $1, updated_at = NOW() WHERE id = $2', ['pending', businessId]);
         
-        // Create notification for admin
+        // Create admin notification
         await pool.query(
             `INSERT INTO admin_notifications (type, title, message, business_id, reference_id, is_read)
              VALUES ($1, $2, $3, $4, $5, false)`,
-            [
-                'payment',
-                'New Payment Submission',
-                `${bizName} (${ownerName}) submitted ${amount} ETB for ${plan} plan via ${payment_method || 'manual'}. Ref: ${transaction_ref || 'N/A'}`,
-                businessId,
-                result.rows[0].id
-            ]
+            ['payment', 'New Payment', `${bizName} (${ownerName}) submitted ${amount} ETB for ${plan} plan via ${payment_method || 'manual'}. Ref: ${transaction_ref || 'N/A'}`, businessId, result.rows[0].id]
         );
         
-        // Send Telegram notification to admin if configured
+        // Send Telegram to admin
         if (TELEGRAM_BOT_TOKEN && process.env.ADMIN_TELEGRAM_CHAT_ID) {
-            const telegramMsg = `
-🔔 <b>New Payment Submitted!</b>
-
-<b>Business:</b> ${bizName}
-<b>Owner:</b> ${ownerName}
-<b>Phone:</b> ${ownerPhone}
-<b>Plan:</b> ${plan.toUpperCase()}
-<b>Amount:</b> ${amount} ETB
-<b>Method:</b> ${payment_method || 'manual'}
-<b>Reference:</b> ${transaction_ref || 'N/A'}
-
-<i>Please verify this payment in the Admin Panel.</i>
-            `;
-            await sendTelegramMessage(process.env.ADMIN_TELEGRAM_CHAT_ID, telegramMsg);
+            await sendTelegramMessage(process.env.ADMIN_TELEGRAM_CHAT_ID, 
+                `🔔 <b>New Payment!</b>\n\n<b>Business:</b> ${bizName}\n<b>Owner:</b> ${ownerName}\n<b>Phone:</b> ${ownerPhone}\n<b>Plan:</b> ${plan.toUpperCase()}\n<b>Amount:</b> ${amount} ETB\n<b>Method:</b> ${payment_method || 'manual'}\n<b>Ref:</b> ${transaction_ref || 'N/A'}\n\n<i>Verify in Admin Panel.</i>`
+            );
         }
         
-        res.status(201).json({ 
-            success: true, 
-            payment: result.rows[0],
-            message: 'Payment submitted! Waiting for admin verification.'
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.status(201).json({ success: true, payment: result.rows[0], message: 'Payment submitted! Waiting for admin verification.' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Get payment history (User side)
+// Get my payments
 app.get('/api/subscription/payments', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
@@ -1656,71 +1680,56 @@ app.get('/api/subscription/payments', authenticate, async (req, res) => {
             [req.user.business_id]
         );
         res.json({ payments: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Get payment status (User side)
+// Get my subscription status
 app.get('/api/subscription/my-status', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT subscription_tier, payment_status, last_payment_date, next_payment_date,
                     (SELECT COALESCE(SUM(amount), 0) FROM subscription_payments WHERE business_id = $1 AND payment_status = 'verified') as total_paid
-             FROM businesses WHERE id = $1`,
-            [req.user.business_id]
+             FROM businesses WHERE id = $1`, [req.user.business_id]
         );
         
         const biz = result.rows[0];
         res.json({
-            plan: biz.subscription_tier,
-            payment_status: biz.payment_status,
-            last_payment: biz.last_payment_date,
-            next_payment: biz.next_payment_date,
+            plan: biz.subscription_tier, payment_status: biz.payment_status,
+            last_payment: biz.last_payment_date, next_payment: biz.next_payment_date,
             total_paid: parseFloat(biz.total_paid)
         });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ============================================
 // ADMIN NOTIFICATIONS
 // ============================================
-
-// Get unread notifications for admin
 app.get('/api/admin/notifications', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const result = await pool.query(
             'SELECT * FROM admin_notifications WHERE is_read = false ORDER BY created_at DESC LIMIT 20'
         );
         res.json({ notifications: result.rows, unread_count: result.rows.length });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Mark notification as read
 app.put('/api/admin/notifications/:id/read', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         await pool.query('UPDATE admin_notifications SET is_read = true WHERE id = $1', [req.params.id]);
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Mark all as read
 app.put('/api/admin/notifications/read-all', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         await pool.query('UPDATE admin_notifications SET is_read = true WHERE is_read = false');
         res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Get all payments for admin verification
+// ============================================
+// ADMIN PAYMENTS MANAGEMENT
+// ============================================
 app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const { status } = req.query;
@@ -1732,32 +1741,24 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
         `;
         const params = [];
         
-        if (status) {
-            params.push(status);
-            query += ` AND sp.payment_status = $${params.length}`;
-        }
-        
+        if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
         
         const result = await pool.query(query, params);
         res.json({ payments: result.rows });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Verify or reject payment
 app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { status } = req.body; // 'verified' or 'rejected'
+        const { status } = req.body;
         
         const payment = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
         if (payment.rows.length === 0) return res.status(404).json({ error: 'Payment not found' });
         
         const p = payment.rows[0];
         
-        // Update payment status
         await pool.query(
             'UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
             [status, req.user.id, id]
@@ -1767,34 +1768,27 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             const nextDate = new Date();
             nextDate.setDate(nextDate.getDate() + 30);
             
-            // Update business subscription
             await pool.query(
-                `UPDATE businesses SET 
-                    subscription_tier = $1,
-                    payment_status = 'paid',
-                    last_payment_date = CURRENT_DATE,
-                    next_payment_date = $2,
-                    updated_at = NOW()
+                `UPDATE businesses SET subscription_tier = $1, payment_status = 'paid',
+                 last_payment_date = CURRENT_DATE, next_payment_date = $2, updated_at = NOW()
                  WHERE id = $3`,
                 [p.plan, nextDate.toISOString().split('T')[0], p.business_id]
             );
             
-            // Notify the business owner
+            // Notify business owner via Telegram
             const business = await pool.query('SELECT phone FROM businesses WHERE id = $1', [p.business_id]);
             if (business.rows[0]?.phone && TELEGRAM_BOT_TOKEN) {
                 const customer = await pool.query('SELECT telegram_chat_id FROM customers WHERE phone = $1 LIMIT 1', [business.rows[0].phone]);
                 if (customer.rows[0]?.telegram_chat_id) {
                     await sendTelegramMessage(customer.rows[0].telegram_chat_id, 
-                        `✅ <b>Payment Verified!</b>\n\nYour ${p.plan.toUpperCase()} plan has been activated.\nAmount: ${p.amount} ETB\nValid until: ${nextDate.toISOString().split('T')[0]}\n\nThank you for your payment! 🙏`
+                        `✅ <b>Payment Verified!</b>\n\nYour ${p.plan.toUpperCase()} plan is activated.\nAmount: ${p.amount} ETB\nValid until: ${nextDate.toISOString().split('T')[0]}`
                     );
                 }
             }
         }
         
         res.json({ success: true, message: `Payment ${status}` });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ============================================
@@ -1803,74 +1797,41 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
 app.get('/api/payment-methods', authenticate, async (req, res) => {
     res.json({
         methods: [
-            {
-                name: 'Telebirr',
-                account: '0945305180',
-                instructions: 'Send to Telebirr: 0945305180 (Kassie Taye)'
-            },
-            {
-                name: 'CBE Birr',
-                account: '0945305180',
-                instructions: 'Dial *847# → Send Money → 0945305180'
-            },
-            {
-                name: 'Bank Transfer',
-                bank: 'Commercial Bank of Ethiopia',
-                account_number: '1000234567890',
-                account_name: 'Kassie Taye',
-                instructions: 'Transfer and submit reference number'
-            },
-            {
-                name: 'Cash',
-                instructions: 'Pay in person at our office'
-            }
+            { name: 'Telebirr', account: '0945305180', instructions: 'Send to Telebirr: 0945305180 (Kassie Taye)' },
+            { name: 'CBE Birr', account: '0945305180', instructions: 'Dial *847# → Send Money → 0945305180' },
+            { name: 'Bank Transfer', bank: 'Commercial Bank of Ethiopia', account_number: '1000234567890', account_name: 'Kassie Taye', instructions: 'Transfer and submit reference' },
+            { name: 'Cash', instructions: 'Pay in person at our office' }
         ]
     });
 });
 
 // ============================================
-// CLIENT MANAGEMENT (SUPER ADMIN)
+// CLIENT MANAGEMENT
 // ============================================
-
-// Get all clients
 app.get('/api/admin/clients', authenticate, async (req, res) => {
     try {
-        const result = await pool.query(
-            'SELECT * FROM clients ORDER BY created_at DESC'
-        );
+        const result = await pool.query('SELECT * FROM clients ORDER BY created_at DESC');
         res.json({ clients: result.rows });
-    } catch (error) {
-        console.error('Get clients error:', error);
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Add new client
 app.post('/api/admin/clients', authenticate, async (req, res) => {
     try {
         const { business_name, owner_name, phone, email, city, subscription_plan, monthly_fee } = req.body;
-        
-        if (!business_name || !owner_name || !phone) {
-            return res.status(400).json({ error: 'Business name, owner, and phone are required' });
-        }
+        if (!business_name || !owner_name || !phone) return res.status(400).json({ error: 'Business name, owner, and phone required' });
         
         const result = await pool.query(
             `INSERT INTO clients (business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, subscription_start)
              VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE) RETURNING *`,
             [business_name, owner_name, phone, email || null, city || null, subscription_plan || 'trial', monthly_fee || 0]
         );
-        
-        res.status(201).json({ success: true, client: result.rows[0], message: 'Client added successfully' });
+        res.status(201).json({ success: true, client: result.rows[0] });
     } catch (error) {
-        console.error('Add client error:', error);
-        if (error.code === '23505') {
-            return res.status(400).json({ error: 'Phone number already registered' });
-        }
+        if (error.code === '23505') return res.status(400).json({ error: 'Phone already registered' });
         res.status(500).json({ error: error.message });
     }
 });
 
-// Update client
 app.put('/api/admin/clients/:id', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
@@ -1878,62 +1839,35 @@ app.put('/api/admin/clients/:id', authenticate, async (req, res) => {
         
         const result = await pool.query(
             `UPDATE clients SET 
-                business_name = COALESCE($1, business_name),
-                owner_name = COALESCE($2, owner_name),
-                phone = COALESCE($3, phone),
-                email = COALESCE($4, email),
-                city = COALESCE($5, city),
-                subscription_plan = COALESCE($6, subscription_plan),
-                monthly_fee = COALESCE($7, monthly_fee),
-                is_active = COALESCE($8, is_active),
-                notes = COALESCE($9, notes),
-                payment_status = COALESCE($10, payment_status),
-                updated_at = NOW()
+                business_name = COALESCE($1, business_name), owner_name = COALESCE($2, owner_name),
+                phone = COALESCE($3, phone), email = COALESCE($4, email), city = COALESCE($5, city),
+                subscription_plan = COALESCE($6, subscription_plan), monthly_fee = COALESCE($7, monthly_fee),
+                is_active = COALESCE($8, is_active), notes = COALESCE($9, notes),
+                payment_status = COALESCE($10, payment_status), updated_at = NOW()
              WHERE id = $11 RETURNING *`,
             [business_name, owner_name, phone, email, city, subscription_plan, monthly_fee, is_active, notes, payment_status, id]
         );
-        
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Client not found' });
-        }
-        
-        res.json({ success: true, client: result.rows[0], message: 'Client updated successfully' });
-    } catch (error) {
-        console.error('Update client error:', error);
-        res.status(500).json({ error: error.message });
-    }
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Client not found' });
+        res.json({ success: true, client: result.rows[0] });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Record payment for client
 app.post('/api/admin/clients/:id/payment', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
         const { amount, payment_method } = req.body;
+        if (!amount || amount <= 0) return res.status(400).json({ error: 'Valid amount required' });
         
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: 'Valid amount required' });
-        }
+        await pool.query('UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3', [amount, 'paid', id]);
+        await pool.query('INSERT INTO client_payments (client_id, amount, payment_method, recorded_by) VALUES ($1, $2, $3, $4)', [id, amount, payment_method || 'cash', req.user.id]);
         
-        // Update client total paid
-        await pool.query(
-            'UPDATE clients SET total_paid = total_paid + $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
-            [amount, 'paid', id]
-        );
-        
-        // Record payment history
-        await pool.query(
-            `INSERT INTO client_payments (client_id, amount, payment_method, recorded_by)
-             VALUES ($1, $2, $3, $4)`,
-            [id, amount, payment_method || 'cash', req.user.id]
-        );
-        
-        res.json({ success: true, message: 'Payment recorded successfully' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json({ success: true, message: 'Payment recorded' });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Get admin dashboard stats
+// ============================================
+// DASHBOARD
+// ============================================
 app.get('/api/admin/dashboard', authenticate, async (req, res) => {
     try {
         const stats = await pool.query(`
@@ -1945,62 +1879,32 @@ app.get('/api/admin/dashboard', authenticate, async (req, res) => {
                 (SELECT COALESCE(SUM(amount), 0) FROM client_payments WHERE payment_date > NOW() - INTERVAL '30 days') as collected_this_month,
                 (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')) as open_tickets
         `);
-        
-        res.json(stats.rows[0] || {
-            total_clients: 0,
-            new_this_month: 0,
-            mrr: 0,
-            pending_payments: 0,
-            collected_this_month: 0,
-            open_tickets: 0
-        });
-    } catch (error) {
-        console.error('Dashboard error:', error);
-        res.json({
-            total_clients: 0,
-            new_this_month: 0,
-            mrr: 0,
-            pending_payments: 0,
-            collected_this_month: 0,
-            open_tickets: 0
-        });
-    }
+        res.json(stats.rows[0] || { total_clients: 0, new_this_month: 0, mrr: 0, pending_payments: 0, collected_this_month: 0, open_tickets: 0 });
+    } catch (error) { res.json({ total_clients: 0, new_this_month: 0, mrr: 0, pending_payments: 0, collected_this_month: 0, open_tickets: 0 }); }
 });
 
 // ============================================
-// APP VERSION
+// APP VERSION & ANNOUNCEMENTS
 // ============================================
 app.get('/api/app-version', async (req, res) => {
-    res.json({
-        latest_version: '1.0.0',
-        download_url: 'https://your-server.com/SmartSME.apk',
-        update_required: false
-    });
+    res.json({ latest_version: '1.0.0', download_url: 'https://your-server.com/SmartSME.apk', update_required: false });
 });
 
-// ============================================
-// ANNOUNCEMENTS
-// ============================================
 app.get('/api/announcements', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT message FROM announcements 
-             WHERE (business_id = $1 OR business_id IS NULL) 
-             AND is_active = true 
-             ORDER BY created_at DESC LIMIT 1`,
+            `SELECT message FROM announcements WHERE (business_id = $1 OR business_id IS NULL) AND is_active = true ORDER BY created_at DESC LIMIT 1`,
             [req.user.business_id]
         );
         res.json(result.rows[0] || { message: null });
-    } catch (error) {
-        res.json({ message: null });
-    }
+    } catch (error) { res.json({ message: null }); }
 });
 
 // ============================================
 // 404 HANDLER
 // ============================================
 app.use((req, res) => {
-    res.status(404).json({ error: 'Route not found' });
+    res.status(404).json({ error: 'Route not found', path: req.originalUrl });
 });
 
 // ============================================
@@ -2021,6 +1925,19 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`📅 Ethiopian Calendar Support: Enabled`);
     console.log(`💰 Tax System: Optional (VAT/TOT/None)`);
     console.log(`🔔 Payment Notifications: Enabled`);
+    console.log(`\n📋 Available Routes:`);
+    console.log(`  POST /api/auth/register`);
+    console.log(`  POST /api/auth/login`);
+    console.log(`  POST /api/auth/login-with-pin`);
+    console.log(`  GET/POST /api/products`);
+    console.log(`  GET/POST /api/customers`);
+    console.log(`  POST /api/sales`);
+    console.log(`  GET /api/reports/daily`);
+    console.log(`  POST /api/subscription/pay`);
+    console.log(`  GET /api/admin/notifications`);
+    console.log(`  GET /api/admin/payments`);
+    console.log(`  POST /api/z-report/close`);
+    console.log(`  POST /api/telegram-webhook`);
 });
 
 module.exports = app;
