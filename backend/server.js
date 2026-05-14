@@ -4037,17 +4037,13 @@ app.get('/api/admin/payments', authenticate, async (req, res) => {
 
 app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
     try {
-        const { id } = req.params;
-        const { status } = req.body;
-        await pool.query('UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3', [status, req.user.id, id]);
-        if (status === 'verified') {
-            const p = await pool.query('SELECT * FROM subscription_payments WHERE id = $1', [id]);
-            if (p.rows.length > 0) {
-                const nextDate = new Date(); nextDate.setDate(nextDate.getDate() + 30);
-                await pool.query(`UPDATE businesses SET subscription_tier = $1, payment_status = 'paid', last_payment_date = CURRENT_DATE, next_payment_date = $2 WHERE id = $3`, [p.rows[0].plan, nextDate.toISOString().split('T')[0], p.rows[0].business_id]);
-            }
-        }
-        res.json({ success: true, message: `Payment ${status}` });
+        const id = parseInt(req.params.id); // Convert to integer
+        
+        await pool.query(
+            'UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
+            [req.body.status, req.user.id, id]
+        );
+        res.json({ success: true, message: `Payment ${req.body.status}` });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
