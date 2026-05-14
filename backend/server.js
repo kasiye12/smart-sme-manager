@@ -3386,7 +3386,7 @@ app.post('/api/business/upgrade', authenticate, async (req, res) => {
 });
 
 // ============================================
-// SUBSCRIPTION PAYMENT - FIXED VERSION
+// SUBSCRIPTION PAYMENT - FIXED
 // ============================================
 app.post('/api/subscription/pay', authenticate, async (req, res) => {
     const client = await pool.connect();
@@ -3426,7 +3426,7 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
         
         const business = businessResult.rows[0];
         
-        // Insert payment with RETURNING * to get the generated ID
+        // Insert payment with RETURNING * to get the generated ID (UUID or integer)
         const insertResult = await client.query(
             `INSERT INTO subscription_payments (
                 business_id, plan, amount, payment_method, 
@@ -3434,12 +3434,12 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
             ) VALUES ($1, $2, $3, $4, $5, $6, 'pending') 
             RETURNING *`,
             [
-                businessId,
-                plan,
-                amountNum,
-                payment_method || 'manual',
-                transaction_ref || null,
-                notes || null
+                businessId,                    // business_id (UUID)
+                plan,                          // plan (VARCHAR)
+                amountNum,                     // amount (DECIMAL)
+                payment_method || 'manual',    // payment_method (VARCHAR)
+                transaction_ref || null,       // transaction_ref (VARCHAR)
+                notes || null                  // notes (TEXT)
             ]
         );
         
@@ -3475,8 +3475,6 @@ app.post('/api/subscription/pay', authenticate, async (req, res) => {
 <b>Method:</b> ${payment_method || 'manual'}
 <b>Reference:</b> ${transaction_ref || 'N/A'}
 ${notes ? `<b>Notes:</b> ${notes}` : ''}
-
-<i>Please verify this payment in the Admin Panel.</i>
                 `;
                 await sendTelegramMessage(process.env.ADMIN_TELEGRAM_CHAT_ID, telegramMsg);
             } catch (err) {
@@ -3565,7 +3563,7 @@ app.get('/api/subscription/my-status', authenticate, async (req, res) => {
 });
 
 // ============================================
-// ADMIN: GET ALL PAYMENTS (FIXED)
+// ADMIN: GET ALL PAYMENTS - FIXED
 // ============================================
 app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async (req, res) => {
     try {
@@ -3582,7 +3580,7 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
                 sp.notes,
                 sp.created_at, 
                 sp.verified_at,
-                b.id as business_id, 
+                sp.business_id,
                 b.name as business_name, 
                 b.owner_name, 
                 b.phone
@@ -3594,19 +3592,18 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
         
         if (status && ['pending', 'verified', 'rejected'].includes(status)) {
             query += ` WHERE sp.payment_status = $1`;
-            params.push(String(status)); // Ensure VARCHAR type
+            params.push(status);
         }
         
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
         
         const result = await pool.query(query, params);
         
-        // Convert numeric types for JSON response
+        // Ensure IDs are treated as strings for UUID compatibility
         const payments = result.rows.map(p => ({
             ...p,
-            id: parseInt(p.id),
-            amount: parseFloat(p.amount),
-            business_id: parseInt(p.business_id)
+            id: p.id, // Keep as is (UUID or integer)
+            amount: parseFloat(p.amount)
         }));
         
         res.json({ 
@@ -3620,24 +3617,24 @@ app.get('/api/admin/payments', authenticate, authorize('owner', 'admin'), async 
     }
 });
 // ============================================
-// ADMIN: VERIFY PAYMENT - COMPLETELY FIXED
+// ADMIN: VERIFY PAYMENT - FIXED FOR UUID IDs
 // ============================================
 app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admin'), async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         
-        const paymentId = parseInt(req.params.id);
+        const paymentId = req.params.id; // Don't parse as int - keep as UUID
         const { status } = req.body;
         
         console.log(`🔍 Verify request - Payment ID: ${paymentId}, Status: ${status}`);
         console.log(`👤 User: ${req.user.id} (${req.user.role})`);
         
-        // Validate payment ID
-        if (isNaN(paymentId) || paymentId <= 0) {
+        // Validate payment ID (check if it's a non-empty string)
+        if (!paymentId || typeof paymentId !== 'string' || paymentId.trim() === '') {
             return res.status(400).json({ 
                 error: 'Invalid payment ID',
-                received: req.params.id 
+                received: paymentId 
             });
         }
         
@@ -3649,15 +3646,16 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             });
         }
         
-        // Get payment
+        // Get payment using UUID
         const paymentResult = await client.query(
             'SELECT * FROM subscription_payments WHERE id = $1',
-            [paymentId]
+            [paymentId] // Pass as string for UUID
         );
         
         if (paymentResult.rows.length === 0) {
             return res.status(404).json({ 
-                error: `Payment #${paymentId} not found` 
+                error: `Payment not found`,
+                paymentId: paymentId
             });
         }
         
@@ -3666,7 +3664,8 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
         // Check if already processed
         if (payment.payment_status !== 'pending') {
             return res.status(400).json({ 
-                error: `Payment #${paymentId} is already ${payment.payment_status}` 
+                error: `Payment is already ${payment.payment_status}`,
+                currentStatus: payment.payment_status
             });
         }
         
@@ -3690,13 +3689,19 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
             [status, req.user.id, paymentId]
         );
         
-        console.log(`✅ Payment #${paymentId} status updated to: ${status}`);
+        console.log(`✅ Payment status updated to: ${status}`);
         
         // If verified, update business subscription
         if (status === 'verified') {
             const nextDate = new Date();
             nextDate.setDate(nextDate.getDate() + 30);
             const nextDateStr = nextDate.toISOString().split('T')[0];
+            
+            console.log(`📅 Updating business subscription:`, {
+                businessId: payment.business_id,
+                plan: payment.plan,
+                nextDate: nextDateStr
+            });
             
             const bizUpdate = await client.query(
                 `UPDATE businesses SET 
@@ -3708,30 +3713,57 @@ app.put('/api/admin/payments/:id/verify', authenticate, authorize('owner', 'admi
                     subscription_end_date = $2,
                     updated_at = NOW()
                  WHERE id = $3
-                 RETURNING id, name, subscription_tier`,
+                 RETURNING id, name, subscription_tier, payment_status`,
                 [payment.plan || 'starter', nextDateStr, payment.business_id]
             );
             
             if (bizUpdate.rows.length === 0) {
-                console.error(`❌ Business #${payment.business_id} not found!`);
+                console.warn(`⚠️ Business #${payment.business_id} not found!`);
             } else {
-                console.log(`✅ Business #${payment.business_id} updated to ${payment.plan} plan`);
+                console.log(`✅ Business updated:`, bizUpdate.rows[0]);
+            }
+            
+            // Try to notify via Telegram
+            if (TELEGRAM_BOT_TOKEN) {
+                try {
+                    const business = await client.query(
+                        'SELECT phone, name FROM businesses WHERE id = $1', 
+                        [payment.business_id]
+                    );
+                    
+                    if (business.rows[0]?.phone) {
+                        const customer = await client.query(
+                            'SELECT telegram_chat_id FROM customers WHERE phone = $1 LIMIT 1', 
+                            [business.rows[0].phone]
+                        );
+                        
+                        if (customer.rows[0]?.telegram_chat_id) {
+                            await sendTelegramMessage(
+                                customer.rows[0].telegram_chat_id,
+                                `✅ <b>Payment Verified!</b>\n\nYour ${(payment.plan || 'starter').toUpperCase()} plan has been activated.\nAmount: ${payment.amount} ETB\nValid until: ${nextDateStr}\n\nThank you! 🙏`
+                            );
+                        }
+                    }
+                } catch (err) {
+                    console.error('Telegram notification failed:', err.message);
+                }
             }
         }
         
         await client.query('COMMIT');
         
-        console.log(`🎉 Payment #${paymentId} ${status} successfully!`);
+        console.log(`🎉 Payment ${status} successfully!`);
         
         res.json({
             success: true,
-            message: `Payment #${paymentId} ${status} successfully`,
+            message: `Payment ${status} successfully`,
             payment: updateResult.rows[0]
         });
         
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('❌ Verification error:', error);
+        console.error('Stack:', error.stack);
         res.status(500).json({
             error: 'Verification failed',
             detail: error.message
