@@ -4020,13 +4020,18 @@ app.put('/api/admin/subscriptions/:businessId/unlock', authenticate, async (req,
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ============================================
-// ADMIN PAYMENTS & NOTIFICATIONS
-// ============================================
 app.get('/api/admin/payments', authenticate, async (req, res) => {
     try {
         const { status } = req.query;
-        let query = `SELECT sp.*, b.name as business_name, b.owner_name, b.phone FROM subscription_payments sp JOIN businesses b ON sp.business_id = b.id WHERE 1=1`;
+        let query = `
+            SELECT sp.id, sp.business_id, sp.plan, sp.amount, sp.payment_method, 
+                   sp.transaction_ref, sp.payment_status, sp.notes, 
+                   sp.created_at, sp.verified_at,
+                   b.name as business_name, b.owner_name, b.phone
+            FROM subscription_payments sp
+            JOIN businesses b ON sp.business_id = b.id
+            WHERE 1=1
+        `;
         const params = [];
         if (status) { params.push(status); query += ` AND sp.payment_status = $${params.length}`; }
         query += ` ORDER BY sp.created_at DESC LIMIT 50`;
@@ -4035,16 +4040,57 @@ app.get('/api/admin/payments', authenticate, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// ============================================
+// VERIFY PAYMENT (FIXED)
+// ============================================
 app.put('/api/admin/payments/:id/verify', authenticate, async (req, res) => {
     try {
-        const id = parseInt(req.params.id); // Convert to integer
+        const { id } = req.params;
+        const { status } = req.body;
         
-        await pool.query(
-            'UPDATE subscription_payments SET payment_status = $1, verified_by = $2, verified_at = NOW() WHERE id = $3',
-            [req.body.status, req.user.id, id]
+        console.log('Verify payment:', id, status);
+        
+        // Check if ID is valid UUID
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(id)) {
+            return res.status(400).json({ error: 'Invalid payment ID', received: id });
+        }
+        
+        // Update payment status
+        const result = await pool.query(
+            'UPDATE subscription_payments SET payment_status = $1, verified_at = NOW() WHERE id = $2::uuid RETURNING *',
+            [status, id]
         );
-        res.json({ success: true, message: `Payment ${req.body.status}` });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Payment not found' });
+        }
+        
+        const payment = result.rows[0];
+        
+        // If verified, update business subscription
+        if (status === 'verified') {
+            const nextDate = new Date();
+            nextDate.setDate(nextDate.getDate() + 30);
+            
+            await pool.query(
+                `UPDATE businesses SET 
+                    subscription_tier = $1,
+                    payment_status = 'paid',
+                    last_payment_date = CURRENT_DATE,
+                    next_payment_date = $2,
+                    updated_at = NOW()
+                 WHERE id = $3`,
+                [payment.plan, nextDate.toISOString().split('T')[0], payment.business_id]
+            );
+        }
+        
+        res.json({ success: true, message: `Payment ${status}`, payment: result.rows[0] });
+        
+    } catch (error) {
+        console.error('Verify error:', error);
+        res.status(500).json({ error: 'Verification failed', detail: error.message });
+    }
 });
 
 app.get('/api/admin/notifications', authenticate, async (req, res) => {
