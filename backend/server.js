@@ -261,19 +261,46 @@ app.put('/api/auth/change-password', authenticate, async (req, res) => {
     }
 });
 
-// ============================================
-// BUSINESS PROFILE & SETTINGS
-// ============================================
+// In your server.js
 app.get('/api/business/profile', authenticate, async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT id, name, owner_name, phone, email, city, tin_number, tax_type, tax_rate, show_tax_on_receipt, subscription_tier 
-             FROM businesses WHERE id = $1`,
-            [req.user.business_id]
+            `SELECT id, name, owner_name, phone, email, city, 
+                    tin_number, tax_type, tax_rate, 
+                    show_tax_on_receipt, subscription_tier 
+             FROM businesses WHERE id::text = $1::text`,
+            [String(req.user.business_id)]
         );
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Business not found' });
-        res.json(result.rows[0]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Business not found' });
+        }
+        
+        const business = result.rows[0];
+        
+        // Log for debugging
+        console.log('📊 Business profile requested:', {
+            id: business.id,
+            name: business.name,
+            subscription_tier: business.subscription_tier
+        });
+        
+        // Return with subscription_tier
+        res.json({
+            id: business.id,
+            name: business.name,
+            owner_name: business.owner_name,
+            phone: business.phone,
+            email: business.email,
+            city: business.city,
+            tin_number: business.tin_number,
+            tax_type: business.tax_type,
+            tax_rate: business.tax_rate,
+            show_tax_on_receipt: business.show_tax_on_receipt,
+            subscription_tier: business.subscription_tier || 'free'  // Ensure this is returned
+        });
     } catch (error) {
+        console.error('Profile error:', error);
         res.status(500).json({ error: error.message });
     }
 });
