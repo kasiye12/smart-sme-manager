@@ -3,6 +3,9 @@ const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const fetch = require('node-fetch');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 //const Sentry = require('@sentry/node');
 
 // ✅ 1. Initialize Sentry FIRST - before creating the app
@@ -59,6 +62,31 @@ app.get('/', (req, res) => {
     });
 });
 
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = 'uploads/products';
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 500 * 1024 }, // 500KB max
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only images allowed'));
+    }
+  }
+});
 // ============================================
 // HELPER: Get Ethiopian Date (FIXED)
 // ============================================
@@ -385,17 +413,25 @@ app.get('/api/business/tax-settings', authenticate, async (req, res) => {
 // ============================================
 // PRODUCTS
 // ============================================
-app.get('/api/products', authenticate, async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT * FROM products WHERE business_id = $1 AND is_active = true ORDER BY created_at DESC`,
-            [req.user.business_id]
-        );
-        res.json({ products: result.rows });
-    } catch (error) { 
-        res.status(500).json({ error: error.message }); 
-    }
+app.post('/api/products', authenticate, upload.single('product_photo'), async (req, res) => {
+  try {
+    const { name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number } = req.body;
+    
+    const photoUrl = req.file ? `/uploads/products/${req.file.filename}` : null;
+    
+    const result = await pool.query(
+      `INSERT INTO products (business_id, name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, photo_url) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+      [req.user.business_id, name_translations, barcode, cost_price, selling_price, current_stock || 0, unit || 'piece', track_expiry || false, expiry_date || null, batch_number || null, photoUrl]
+    );
+    
+    res.status(201).json({ success: true, product_id: result.rows[0].id, photo_url: photoUrl });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
+
+app.use('/uploads', express.static('uploads'));
 
 app.post('/api/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
     try {
