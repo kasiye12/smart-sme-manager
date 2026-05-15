@@ -418,7 +418,7 @@ app.get('/api/business/tax-settings', authenticate, async (req, res) => {
 // ============================================
 // PRODUCTS
 // ============================================
-/ Update the POST /api/products endpoint to handle file upload
+// Update the POST /api/products endpoint to handle file upload
 app.post('/api/products', authenticate, upload.single('product_photo'), async (req, res) => {
   try {
     const { name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, bulk_unit, bulk_quantity, manufactured_date } = req.body;
