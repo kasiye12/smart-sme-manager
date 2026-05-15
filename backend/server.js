@@ -62,6 +62,7 @@ app.get('/', (req, res) => {
     });
 });
 
+// Configure multer for product photos
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const dir = 'uploads/products';
@@ -76,14 +77,12 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 500 * 1024 }, // 500KB max
-});
+
+
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 500 * 1024 }, // 500KB max
+  limits: { fileSize: 500 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
@@ -418,30 +417,32 @@ app.get('/api/business/tax-settings', authenticate, async (req, res) => {
 // ============================================
 // PRODUCTS
 // ============================================
-// Update the POST /api/products endpoint to handle file upload
-app.post('/api/products', authenticate, upload.single('product_photo'), async (req, res) => {
-  try {
-    const { name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, bulk_unit, bulk_quantity, manufactured_date } = req.body;
-    
-    // Get photo URL if file was uploaded
-    const photoUrl = req.file ? `/uploads/products/${req.file.filename}` : null;
-    
-    console.log('📸 Photo URL:', photoUrl);
-    
-    const result = await pool.query(
-      `INSERT INTO products (business_id, name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, bulk_unit, bulk_quantity, manufactured_date, photo_url) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id, photo_url`,
-      [req.user.business_id, name_translations, barcode, cost_price, selling_price, current_stock || 0, unit || 'piece', track_expiry || false, expiry_date || null, batch_number || null, bulk_unit || null, bulk_quantity || null, manufactured_date || null, photoUrl]
-    );
-    
-    res.status(201).json({ success: true, product_id: result.rows[0].id, photo_url: result.rows[0].photo_url });
-  } catch (error) {
-    console.error('Add product error:', error);
-    res.status(500).json({ error: error.message });
-  }
+app.post('/api/products', authenticate, authorize('owner', 'manager'), upload.single('product_photo'), async (req, res) => {
+    try {
+        const { name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, bulk_unit, bulk_quantity, manufactured_date } = req.body;
+        
+        if (!name_translations || !cost_price || !selling_price) {
+            return res.status(400).json({ error: 'Name, cost price, and selling price required' });
+        }
+        
+        // ✅ Get photo URL if file was uploaded
+        const photoUrl = req.file ? `/uploads/products/${req.file.filename}` : null;
+        console.log('📸 Photo URL:', photoUrl);
+        
+        const result = await pool.query(
+            `INSERT INTO products (business_id, name_translations, barcode, cost_price, selling_price, current_stock, unit, track_expiry, expiry_date, batch_number, bulk_unit, bulk_quantity, manufactured_date, photo_url) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id, photo_url`,
+            [req.user.business_id, name_translations, barcode, cost_price, selling_price, current_stock || 0, unit || 'piece', track_expiry || false, expiry_date || null, batch_number || null, bulk_unit || null, bulk_quantity || null, manufactured_date || null, photoUrl]
+        );
+        
+        res.status(201).json({ success: true, product_id: result.rows[0].id, photo_url: result.rows[0].photo_url });
+    } catch (error) {
+        console.error('Add product error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
-// Serve uploaded files statically
+// ✅ Add this to serve uploaded files
 app.use('/uploads', express.static('uploads'));
 
 app.post('/api/products', authenticate, authorize('owner', 'manager'), async (req, res) => {
