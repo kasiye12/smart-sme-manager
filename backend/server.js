@@ -203,7 +203,7 @@ app.post('/api/auth/register', async (req, res) => {
         
         const userResult = await pool.query(
             'INSERT INTO users (business_id, full_name, phone, password_hash, role) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-            [businessId, owner_name, phone, hashedPassword, 'owner']
+            [businessId, owner_name, phone, hashedPassword, 'manager']
         );
         try {
     await pool.query(
@@ -214,7 +214,7 @@ app.post('/api/auth/register', async (req, res) => {
     console.log('Client sync:', e.message);
 }
         const token = jwt.sign(
-            { id: userResult.rows[0].id, business_id: businessId, role: 'owner' },
+            { id: userResult.rows[0].id, business_id: businessId, role: 'manager' },
             process.env.JWT_SECRET || 'my-super-secret-key-2026',
             { expiresIn: '24h' }
         );
